@@ -355,8 +355,19 @@ body {
    the surrounding gap is only what these rules ask for. (The uncropped asset
    carried ~20% transparent padding on every edge, which read as unwanted
    whitespace no matter how the margins were tuned.) */
+/* bslib reserves 48px of top padding on .sidebar-content to clear the
+   absolutely-positioned collapse toggle. The toggle sits at the right edge and
+   the logo is centred and only 68px wide, so they cannot collide - reclaim
+   most of that space. */
+.bslib-sidebar-layout > .sidebar > .sidebar-content {
+  padding-top: 16px;
+}
+
+/* .sidebar-content is a flex column with row-gap: 24px, and a flex gap cannot
+   be overridden for a single child - so the gap under the logo is pulled back
+   with a negative margin rather than by shrinking the gap for every section. */
 .sidebar-brand {
-  margin-bottom: 8px;
+  margin-bottom: -12px;
   text-align: center;
 }
 
