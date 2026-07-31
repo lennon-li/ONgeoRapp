@@ -351,9 +351,9 @@ body {
 }
 
 /* Brand logo at the top of the sidebar. The header bar is gone, so the logo
-   now scales to the 300px column width instead of a fixed 120px height; the
-   bottom padding separates it from the first control (the Source layer
-   picker) below. */
+   scales to a fraction of the 300px column width rather than a fixed 120px
+   height; the bottom padding separates it from the first control (the Source
+   layer picker) below. */
 .sidebar-brand {
   margin-bottom: 12px;
   padding-bottom: 12px;
@@ -364,8 +364,7 @@ body {
   display: block;
   height: auto;
   margin: 0 auto;
-  max-width: 220px;
-  width: 100%;
+  width: 25%;
 }
 
 /* Preview gets its own color identity, distinct from the primary Link
