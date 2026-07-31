@@ -350,13 +350,13 @@ body {
   cursor: not-allowed;
 }
 
-/* Brand logo at the top of the sidebar. The header bar is gone, so the logo
-   scales to a fraction of the 300px column width rather than a fixed 120px
-   height; the bottom padding separates it from the first control (the Source
-   layer picker) below. */
+/* Brand logo at the top of the sidebar. logo.png is cropped to its artwork,
+   so the box the image occupies is the artwork - sizing here is literal and
+   the surrounding gap is only what these rules ask for. (The uncropped asset
+   carried ~20% transparent padding on every edge, which read as unwanted
+   whitespace no matter how the margins were tuned.) */
 .sidebar-brand {
-  margin-bottom: 12px;
-  padding-bottom: 12px;
+  margin-bottom: 8px;
   text-align: center;
 }
 
@@ -364,7 +364,7 @@ body {
   display: block;
   height: auto;
   margin: 0 auto;
-  width: 25%;
+  width: 68px;
 }
 
 /* Preview gets its own color identity, distinct from the primary Link
@@ -491,8 +491,11 @@ label[for="target_source"] {
   padding: 12px 16px;
 }
 
+/* 18px, not 28px: logo.png is now cropped to its artwork, so a given height
+   renders ~1.5x larger than it did with the padded asset. This keeps the
+   modal logo the same size on screen as before the crop. */
 .info-modal-logo {
-  height: 28px;
+  height: 18px;
   width: auto;
 }
 
