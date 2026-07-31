@@ -494,7 +494,7 @@ add_styled_sf_layer <- function(map, layer, group, style) {
 }
 
 # --- Map furniture -------------------------------------------------------
-# "Furniture" layers are bundled reference outlines drawn on the Link tab
+# "Furniture" layers are bundled reference outlines drawn on the
 # map at all times: they render at app load, before any preview, so the
 # Leaflet widget exists immediately with no retrieval and no network call
 # (both datasets ship in inst/extdata). They use a fixed context style -
@@ -816,7 +816,7 @@ server <- function(input, output, session) {
     })
   })
 
-  # --- Link tab -------------------------------------------------------
+  # --- Layer pickers & preview ---------------------------------------
 
   observeEvent(input$base_layer, {
     groups <- remove_choice_grouped(source_choices_grouped(), input$base_layer)
@@ -1077,7 +1077,7 @@ server <- function(input, output, session) {
     link_state_detail("Results and downloads are ready.")
   }, ignoreInit = TRUE)
 
-  # The Link tab map renders at app load - before any preview - carrying
+  # The map renders at app load - before any preview - carrying
   # only the furniture layers, so the Leaflet widget always exists. After a
   # preview the two styled sources join it, above the tiles and above the
   # furniture in the overlay list. The view is pinned to the Ontario-wide

@@ -127,15 +127,17 @@ clean_shot(app, file.path(fig_dir, "app-link-tab.png"), delay = 0)
 #
 # Poll get_js("document.getElementById('build_btn') ? 'enabled' : 'absent'")
 # which reliably transitions from "absent" to "enabled" after a successful preview.
-# Warm-cache time: ~60 s.
+# Budget: 300 s.  A warm cache completes in ~60 s, but bailing out early
+# yields a partial screenshot set, so this limit is a backstop against a
+# genuine hang, not a performance expectation.
 # ---------------------------------------------------------------------------
 message("--- Clicking 'Preview on map' ---")
 app$click("preview_btn")
-message("Clicked. Polling for Join button to become enabled (up to 150 s) ...")
+message("Clicked. Polling for Join button to become enabled (up to 300 s) ...")
 
 waited  <- 0
 interval <- 5
-limit    <- 150
+limit    <- 300
 
 repeat {
   Sys.sleep(interval)
