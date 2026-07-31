@@ -7,10 +7,16 @@
 .app_file <- tryCatch(
   normalizePath(sys.frame(1)$ofile, mustWork = TRUE),
   error = function(cnd) {
+    # sys.frame(1)$ofile is unset under sys.source(), which is how the test
+    # helper loads this file, so the fallback below is the path the whole
+    # server test suite takes. It must name ONgeoRapp: while it still said
+    # ONgeoR, it resolved to the copy of the app that ONgeoR used to bundle,
+    # and the tests silently exercised that copy instead of this one. The
+    # lookup failed loudly only once ONgeoR dropped inst/shiny in 0.4.0.
     .candidates <- c(
       file.path(getwd(), "app.R"),
       file.path(getwd(), "..", "..", "inst", "shiny", "app.R"),
-      system.file("shiny", "app.R", package = "ONgeoR")
+      system.file("shiny", "app.R", package = "ONgeoRapp")
     )
     .existing <- .candidates[file.exists(.candidates)]
     if (length(.existing) == 0L) {
