@@ -638,12 +638,15 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
 }
 
 ui <- bslib::page_sidebar(
-  title = tags$img(src = "logo.png", height = "120px", style = "vertical-align: middle;"),
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
   fillable = FALSE,
   sidebar = bslib::sidebar(
     width = 300,
+    tags$div(
+      class = "sidebar-brand",
+      tags$img(src = "logo.png", alt = "ONgeoR")
+    ),
     tags$div(class = "slot-block slot-base",
       selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
       tags$div(class = "slot-meta",
@@ -701,7 +704,7 @@ ui <- bslib::page_sidebar(
   bslib::navset_tab(
     bslib::nav_panel(
       "Map",
-      leafletOutput("cw_map", height = "calc(100vh - 150px)")
+      leafletOutput("cw_map", height = "calc(100vh - 60px)")
     ),
     bslib::nav_panel(
       "Data",

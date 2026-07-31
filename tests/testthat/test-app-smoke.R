@@ -63,13 +63,25 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   )
   withr::defer(app$stop())
 
-  # page_sidebar() renders the branding bar as div.navbar (no <nav> element,
-  # no .navbar-brand wrapper) and, because the app has only one view, no
-  # top-level tab strip at all. Assert the logo is there and that the old
-  # single-item "Link" tab has not come back.
-  navbar <- app$get_html("div.navbar")
-  expect_match(navbar, "logo.png", fixed = TRUE)
-  expect_no_match(navbar, "Link", fixed = TRUE)
+  # The branding moved out of the (now removed) header bar and into the top of
+  # the sidebar, wrapped in .sidebar-brand. bslib renders the sidebar column as
+  # .bslib-sidebar-layout > .sidebar; .sidebar alone is unambiguous here since
+  # the page has exactly one sidebar. Assert the logo lives there.
+  sidebar <- app$get_html(".sidebar")
+  expect_match(sidebar, "sidebar-brand", fixed = TRUE)
+  expect_match(sidebar, "logo.png", fixed = TRUE)
+
+  # With no title argument, page_sidebar() renders no header bar at all - that
+  # is the point of the change. Assert neither flavour of navbar element (the
+  # div.navbar page_sidebar used to emit, nor a nav.navbar) is present.
+  expect_true(app$get_js(
+    "document.querySelector('div.navbar, nav.navbar') === null"
+  ))
+
+  # The app still has only the Map and Data views, so the old single-item
+  # "Link" tab must not have come back; scope the check to the tab strip so
+  # unrelated controls cannot trip it.
+  expect_no_match(app$get_html(".nav-tabs"), "Link", fixed = TRUE)
 
   expect_match(app$get_html("#base_layer"), "base_layer", fixed = TRUE)
   expect_match(

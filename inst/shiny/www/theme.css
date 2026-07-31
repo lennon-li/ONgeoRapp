@@ -350,30 +350,22 @@ body {
   cursor: not-allowed;
 }
 
-/* Logo is 3x its original size (36px -> 120px); the navbar's own vertical
-   padding is trimmed so the bar doesn't balloon to match, and the brand
-   image is allowed to overflow the (bslib-fixed-height) navbar cleanly. */
-.navbar {
-  padding-bottom: 0.1rem;
-  padding-top: 0.1rem;
+/* Brand logo at the top of the sidebar. The header bar is gone, so the logo
+   now scales to the 300px column width instead of a fixed 120px height; the
+   bottom padding separates it from the first control (the Source layer
+   picker) below. */
+.sidebar-brand {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  text-align: center;
 }
 
-/* page_sidebar() puts the title straight into .container-fluid with no
-   .navbar-brand wrapper (page_navbar() did), so the brand rules live on the
-   container. Both selectors are kept so the styling survives either page
-   function. */
-.navbar-brand,
-.navbar .container-fluid {
-  align-items: center;
-  display: flex;
-  overflow: visible;
-  padding-bottom: 0.1rem;
-  padding-top: 0.1rem;
-}
-
-.navbar img {
-  height: 120px;
-  width: auto;
+.sidebar-brand img {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-width: 220px;
+  width: 100%;
 }
 
 /* Preview gets its own color identity, distinct from the primary Link
