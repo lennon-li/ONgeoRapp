@@ -1,0 +1,530 @@
+:root {
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-2: #1baf7a;
+  --status-good: #0ca30c;
+}
+
+body {
+  background: var(--page);
+  color: var(--text-primary);
+}
+
+.bslib-sidebar-layout > .sidebar,
+.sidebar {
+  background: var(--surface-1);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar,
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.form-select,
+.form-control {
+  background: var(--page);
+  border-color: var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.selectize-input {
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: none;
+  font-size: 13px;
+}
+
+.selectize-input.focus {
+  border-color: var(--baseline);
+  box-shadow: none;
+}
+
+.selectize-dropdown {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.selectize-dropdown .option.active {
+  background: var(--page);
+  color: var(--text-primary);
+}
+
+/* Zebra-stripe dropdown option rows so long source lists are easier to scan. */
+.selectize-dropdown .option:nth-child(even) {
+  background: #f2f1ec;
+}
+
+.selectize-dropdown .option:hover,
+.selectize-dropdown .option.active {
+  background: #e1e0d9;
+}
+
+/* Geometry-type feedback badges shown under the source pickers. */
+.geo-badge {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  margin: -4px 0 8px;
+  padding: 2px 10px;
+  text-transform: uppercase;
+}
+
+.geo-polygon {
+  background: rgba(42, 120, 214, 0.15);
+  color: #2266bb;
+}
+
+.geo-point {
+  background: rgba(227, 73, 72, 0.15);
+  color: #c23a39;
+}
+
+.geo-raster {
+  background: rgba(27, 175, 122, 0.15);
+  color: #148a60;
+}
+
+.geo-other {
+  background: var(--grid);
+  color: var(--text-secondary);
+}
+
+.geo-relationship {
+  margin: 0 0 10px;
+}
+
+/* Badge + "Use my own file" checkbox share one compact row: badge left,
+   checkbox right. Bottom margins on both children are killed so the row
+   stays tight against the picker above and the conditionalPanel below. */
+.slot-meta {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.slot-meta .geo-badge {
+  margin: 0;
+}
+
+.slot-meta .shiny-input-container {
+  margin-bottom: 0;
+}
+
+.slot-meta .checkbox {
+  margin: 0;
+}
+
+.slot-meta .checkbox label {
+  align-items: center;
+  color: var(--text-secondary);
+  display: flex;
+  font-size: 11px;
+  font-weight: 400;
+  gap: 4px;
+  margin: 0;
+  text-transform: none;
+}
+
+.slot-meta .checkbox input[type="checkbox"] {
+  margin: 0;
+  transform: scale(0.85);
+}
+
+/* Slot accent treatment: a colored left-border groups each picker + its
+   badge with the layer slot it belongs to (blue = base/source, green =
+   overlay/target), echoed in the matching accordion panel title dot below. */
+.slot-block {
+  border-left: 3px solid transparent;
+  margin-bottom: 10px;
+  padding-left: 10px;
+}
+
+.slot-base {
+  border-left-color: var(--series-1);
+}
+
+.slot-overlay {
+  border-left-color: var(--series-2);
+}
+
+.slot-title {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.slot-title::before {
+  border-radius: 50%;
+  content: "";
+  display: inline-block;
+  height: 8px;
+  width: 8px;
+}
+
+.slot-title-base::before {
+  background: var(--series-1);
+}
+
+.slot-title-overlay::before {
+  background: var(--series-2);
+}
+
+/* Flat accordion styling for the folded per-layer style controls. */
+.accordion {
+  --bs-accordion-border-color: var(--border);
+  --bs-accordion-border-radius: 8px;
+  --bs-accordion-active-bg: transparent;
+  --bs-accordion-active-color: var(--text-primary);
+  --bs-accordion-btn-focus-box-shadow: none;
+}
+
+.accordion-item {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.accordion-button {
+  background: var(--page);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 0.5rem 0.7rem;
+  text-transform: uppercase;
+}
+
+.accordion-button:not(.collapsed) {
+  background: var(--surface-1);
+  box-shadow: none;
+  color: var(--text-primary);
+}
+
+.accordion-button:focus {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.accordion-body {
+  padding: 0.6rem 0.7rem;
+}
+
+.irs-grid,
+.irs-min,
+.irs-max {
+  display: none;
+}
+
+.irs--shiny .irs-line {
+  background: var(--grid);
+  border: 0;
+  height: 4px;
+  top: 20px;
+}
+
+.irs--shiny .irs-bar {
+  background: var(--series-1);
+  border: 0;
+  height: 4px;
+  top: 20px;
+}
+
+.irs--shiny .irs-handle,
+.irs--shiny .irs-handle:hover,
+.irs--shiny .irs-handle.state_hover {
+  background: var(--series-1);
+  border: 0;
+  border-radius: 50%;
+  box-shadow: none;
+  height: 16px;
+  top: 14px;
+  width: 16px;
+}
+
+.irs--shiny .irs-single,
+.irs--shiny .irs-from,
+.irs--shiny .irs-to {
+  background: var(--series-1);
+  border-radius: 6px;
+  font-size: 10px;
+}
+
+.irs--shiny .irs-single::before,
+.irs--shiny .irs-from::before,
+.irs--shiny .irs-to::before {
+  border-top-color: var(--series-1);
+}
+
+.nav-tabs,
+.navbar-nav {
+  align-items: stretch;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--grid);
+  border-radius: 0;
+  flex-grow: 1 !important;
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 0;
+  width: 100%;
+}
+
+.nav-tabs .nav-link,
+.navbar-nav .nav-link {
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 2px solid transparent !important;
+  border-radius: 0;
+  color: var(--text-secondary);
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+
+.nav-link {
+  color: var(--text-secondary);
+  padding: 0.35rem 0.7rem !important;
+  text-decoration: none !important;
+}
+
+.nav-link:hover,
+.nav-link:focus {
+  color: var(--text-primary);
+}
+
+.nav-link.active,
+.nav-tabs .nav-link.active,
+.navbar-nav .nav-link.active {
+  background: transparent !important;
+  border-bottom: 2px solid var(--series-1) !important;
+  color: var(--text-primary) !important;
+  text-decoration: none !important;
+}
+
+.btn-primary {
+  background-color: var(--series-1) !important;
+  border: 0;
+  border-color: var(--series-1) !important;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  background-color: #2266bb !important;
+  border-color: #2266bb !important;
+}
+
+/* Bootstrap marks a disabled button only by dropping it to opacity .65, and the
+   !important background above wins over its disabled variant - so a Join button
+   that is not yet available still rendered full-strength blue and read as
+   clickable. Join is gated on a successful preview of the current pair, so that
+   state has to be unmistakable. Grey it out explicitly, and keep opacity at 1 so
+   the flat grey is what shows rather than a washed-out blue. */
+.btn-primary:disabled,
+.btn-primary.disabled,
+.btn-preview:disabled,
+.btn-preview.disabled {
+  background-color: var(--baseline) !important;
+  border-color: var(--baseline) !important;
+  color: var(--surface-1) !important;
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+/* Logo is 3x its original size (36px -> 120px); the navbar's own vertical
+   padding is trimmed so the bar doesn't balloon to match, and the brand
+   image is allowed to overflow the (bslib-fixed-height) navbar cleanly. */
+.navbar {
+  padding-bottom: 0.1rem;
+  padding-top: 0.1rem;
+}
+
+.navbar-brand {
+  align-items: center;
+  display: flex;
+  overflow: visible;
+  padding-bottom: 0.1rem;
+  padding-top: 0.1rem;
+}
+
+.navbar-brand img {
+  height: 120px;
+  width: auto;
+}
+
+/* Preview gets its own color identity, distinct from the primary Link
+   button: green = "look first" (non-committing), blue = "commit". */
+.btn-preview {
+  background: var(--series-2);
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-preview:hover,
+.btn-preview:focus {
+  background: #159066;
+  border-color: #159066;
+  color: #fff;
+}
+
+.btn-outline-secondary {
+  background: var(--page);
+  border-color: var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.btn-outline-secondary:hover,
+.btn-outline-secondary:focus {
+  background: var(--surface-1);
+  border-color: var(--baseline);
+  color: var(--text-primary);
+}
+
+.form-label,
+.shiny-input-container > label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* Slot picker labels (Base layer / Overlay source / Target source) are the
+   primary decision point in each sidebar section, so they get a bolder,
+   bigger treatment than the generic form-label style above. Scoped by
+   input id so only these three pickers are affected - not the "Layer type"
+   select or any other label nested under a .slot-block. */
+label[for="base_layer"],
+label[for="overlay_source"],
+label[for="target_source"] {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.text-muted {
+  color: var(--text-muted) !important;
+  font-size: 12px;
+}
+
+/* Inline "?" help affordance next to the Match rule control; opens the
+   combination-matrix modal. */
+.method-help {
+  align-items: center;
+  background: var(--grid);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  height: 18px;
+  justify-content: center;
+  margin: -4px 0 6px;
+  text-decoration: none;
+  width: 18px;
+}
+
+.method-help:hover,
+.method-help:focus {
+  background: var(--baseline);
+  color: var(--text-primary);
+}
+
+/* Combination-matrix table rendered inside the help modal. */
+.link-matrix {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+.link-matrix th,
+.link-matrix td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.link-matrix thead th {
+  background: var(--page);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+/* Rounded modal shell for all modals (pairing-info + method-help). */
+.modal-content {
+  border: 0;
+  border-radius: 12px;
+}
+
+/* Pairing-info modal shown after every successful preview: a colored header
+   row with the logo and an info-sign icon, above the plain-language
+   explanation. Negative margins pull the header flush with the (16px
+   padding) Bootstrap .modal-body edges and up against the modal's own
+   rounded top corners. */
+.info-modal-header {
+  align-items: center;
+  background: var(--series-1);
+  border-radius: 12px 12px 0 0;
+  color: #fff;
+  display: flex;
+  gap: 10px;
+  margin: -16px -16px 12px -16px;
+  padding: 12px 16px;
+}
+
+.info-modal-logo {
+  height: 28px;
+  width: auto;
+}
+
+.info-modal-icon {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.info-modal-header h4 {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* modalButton() renders a plain .btn-default, and the footer is a sibling of
+   .modal-body (not a descendant of .info-modal), so :has() is used to scope
+   the OK button's btn-primary look to this modal only - the method-help
+   matrix modal's "Close" button is unaffected. */
+.modal-content:has(.info-modal) .modal-footer .btn {
+  background-color: var(--series-1);
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.modal-content:has(.info-modal) .modal-footer .btn:hover,
+.modal-content:has(.info-modal) .modal-footer .btn:focus {
+  background-color: #2266bb;
+}
