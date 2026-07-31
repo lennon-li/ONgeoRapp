@@ -13,7 +13,7 @@
 #   - ONgeoR installed (install.packages(".", repos=NULL, type="source"))
 #
 # Capture targets
-#   man/figures/app-link-tab.png      Link tab at load; Join button greyed out
+#   man/figures/app-link-tab.png      app at load; Join button greyed out
 #   man/figures/app-preview-map.png   After successful preview; both layers on Map
 #   man/figures/app-join-confirm.png  Join confirmation modal
 #   man/figures/app-data-tab.png      Data sub-tab after join completes
@@ -39,7 +39,7 @@ source_app <- file.path(getwd(), "inst", "shiny")
 if (dir.exists(source_app)) {
   app_dir <- source_app
 } else {
-  app_dir <- system.file("shiny", package = "ONgeoR", mustWork = TRUE)
+  app_dir <- system.file("shiny", package = "ONgeoRapp", mustWork = TRUE)
 }
 message("App dir: ", app_dir)
 

@@ -358,7 +358,12 @@ body {
   padding-top: 0.1rem;
 }
 
-.navbar-brand {
+/* page_sidebar() puts the title straight into .container-fluid with no
+   .navbar-brand wrapper (page_navbar() did), so the brand rules live on the
+   container. Both selectors are kept so the styling survives either page
+   function. */
+.navbar-brand,
+.navbar .container-fluid {
   align-items: center;
   display: flex;
   overflow: visible;
@@ -366,7 +371,7 @@ body {
   padding-top: 0.1rem;
 }
 
-.navbar-brand img {
+.navbar img {
   height: 120px;
   width: auto;
 }

@@ -637,79 +637,75 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
   sf::st_sf(geometry = lines)
 }
 
-ui <- bslib::page_navbar(
+ui <- bslib::page_sidebar(
   title = tags$img(src = "logo.png", height = "120px", style = "vertical-align: middle;"),
+  window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
-  header = tags$head(tags$link(rel = "stylesheet", href = "theme.css")),
-  bslib::nav_panel(
-    "Link",
-    bslib::layout_sidebar(
-      fillable = FALSE,
-      sidebar = bslib::sidebar(
-        width = 300,
-        tags$div(class = "slot-block slot-base",
-          selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
-          tags$div(class = "slot-meta",
-            uiOutput("base_geom_badge"),
-            checkboxInput("base_upload_own", "Use my own file", FALSE)
-          ),
-          conditionalPanel(
-            "input.base_upload_own",
-            fileInput("base_own_file", NULL, buttonLabel = "Browse...",
-              placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-            selectInput("base_own_type", "Layer type",
-              c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-            tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-          )
-        ),
-        tags$div(class = "slot-block slot-overlay",
-          selectInput("overlay_source", "Target layer", choices = source_choices_grouped(), selected = "moh_service_locations"),
-          tags$div(class = "slot-meta",
-            uiOutput("overlay_geom_badge"),
-            checkboxInput("overlay_upload_own", "Use my own file", FALSE)
-          ),
-          conditionalPanel(
-            "input.overlay_upload_own",
-            fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
-              placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-            selectInput("overlay_own_type", "Layer type",
-              c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-            tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-          )
-        ),
-        uiOutput("link_relationship"),
-        uiOutput("link_method_ui"),
-        actionButton("preview_btn", "Preview on map", class = "btn-preview w-100 mb-1"),
-        uiOutput("build_btn_ui"),
-        uiOutput("link_task_status"),
-        tags$hr(),
-        bslib::accordion(
-          open = FALSE,
-          bslib::accordion_panel(
-            tags$span(class = "slot-title slot-title-base", "Source layer style"),
-            uiOutput("base_style_ui"),
-            value = "Source layer style"
-          ),
-          bslib::accordion_panel(
-            tags$span(class = "slot-title slot-title-overlay", "Target layer style"),
-            uiOutput("overlay_style_ui"),
-            value = "Target layer style"
-          )
-        ),
-        tags$hr(),
-        tags$strong("Downloads"),
-        uiOutput("link_downloads_ui")
+  fillable = FALSE,
+  sidebar = bslib::sidebar(
+    width = 300,
+    tags$div(class = "slot-block slot-base",
+      selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
+      tags$div(class = "slot-meta",
+        uiOutput("base_geom_badge"),
+        checkboxInput("base_upload_own", "Use my own file", FALSE)
       ),
-      bslib::navset_tab(
-        bslib::nav_panel(
-          "Map",
-          leafletOutput("cw_map", height = "calc(100vh - 150px)")
-        ),
-        bslib::nav_panel(
-          "Data",
-          DT::dataTableOutput("cw_table")
-        )
+      conditionalPanel(
+        "input.base_upload_own",
+        fileInput("base_own_file", NULL, buttonLabel = "Browse...",
+          placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
+        selectInput("base_own_type", "Layer type",
+          c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
+        tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
       )
+    ),
+    tags$div(class = "slot-block slot-overlay",
+      selectInput("overlay_source", "Target layer", choices = source_choices_grouped(), selected = "moh_service_locations"),
+      tags$div(class = "slot-meta",
+        uiOutput("overlay_geom_badge"),
+        checkboxInput("overlay_upload_own", "Use my own file", FALSE)
+      ),
+      conditionalPanel(
+        "input.overlay_upload_own",
+        fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
+          placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
+        selectInput("overlay_own_type", "Layer type",
+          c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
+        tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
+      )
+    ),
+    uiOutput("link_relationship"),
+    uiOutput("link_method_ui"),
+    actionButton("preview_btn", "Preview on map", class = "btn-preview w-100 mb-1"),
+    uiOutput("build_btn_ui"),
+    uiOutput("link_task_status"),
+    tags$hr(),
+    bslib::accordion(
+      open = FALSE,
+      bslib::accordion_panel(
+        tags$span(class = "slot-title slot-title-base", "Source layer style"),
+        uiOutput("base_style_ui"),
+        value = "Source layer style"
+      ),
+      bslib::accordion_panel(
+        tags$span(class = "slot-title slot-title-overlay", "Target layer style"),
+        uiOutput("overlay_style_ui"),
+        value = "Target layer style"
+      )
+    ),
+    tags$hr(),
+    tags$strong("Downloads"),
+    uiOutput("link_downloads_ui")
+  ),
+  tags$head(tags$link(rel = "stylesheet", href = "theme.css")),
+  bslib::navset_tab(
+    bslib::nav_panel(
+      "Map",
+      leafletOutput("cw_map", height = "calc(100vh - 150px)")
+    ),
+    bslib::nav_panel(
+      "Data",
+      DT::dataTableOutput("cw_table")
     )
   )
 )

@@ -34,14 +34,16 @@ ONgeoRapp::run_app(port = 4321, launch.browser = FALSE)
 The app requires the `shiny` and `bslib` packages; `run_app()` checks for them
 at startup and prompts you to install them if they are missing.
 
-## The Link tab
+## Building a link
 
-```{r screenshot-link-tab, echo=FALSE, out.width="100%", fig.cap="The Link tab at startup. Source and Target layer pickers are set to their defaults; the Join button is greyed out until a preview succeeds."}
+```{r screenshot-link-tab, echo=FALSE, out.width="100%", fig.cap="The app at startup. Source and Target layer pickers are set to their defaults; the Join button is greyed out until a preview succeeds."}
 knitr::include_graphics("../man/figures/app-link-tab.png")
 ```
 
-The app has a single working tab. It retrieves two registered Ontario GeoHub or
-LIO layers and joins them spatially.
+The app does one thing: it retrieves two registered Ontario GeoHub or LIO
+layers and joins them spatially. There is no top-level navigation, because
+there is only one view to navigate to — the sidebar holds the controls and the
+Map/Data tabs hold the two views of the result.
 
 There is no match-rule control. Once you have picked a Source layer and a
 Target layer, the operation is fully determined by their geometry types, so

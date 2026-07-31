@@ -63,8 +63,13 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   )
   withr::defer(app$stop())
 
-  navbar <- app$get_html("nav.navbar")
-  expect_match(navbar, "Link", fixed = TRUE)
+  # page_sidebar() renders the branding bar as div.navbar (no <nav> element,
+  # no .navbar-brand wrapper) and, because the app has only one view, no
+  # top-level tab strip at all. Assert the logo is there and that the old
+  # single-item "Link" tab has not come back.
+  navbar <- app$get_html("div.navbar")
+  expect_match(navbar, "logo.png", fixed = TRUE)
+  expect_no_match(navbar, "Link", fixed = TRUE)
 
   expect_match(app$get_html("#base_layer"), "base_layer", fixed = TRUE)
   expect_match(
@@ -77,7 +82,7 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   ))
 })
 
-# The Link tab map renders at app load with its furniture layers (the
+# The map renders at app load with its furniture layers (the
 # bundled PHU_simple boundary outline and the HIVE grid) and no preview, so
 # the Leaflet widget and its basemap control exist immediately with no
 # retrieval and no network. Basemap switching is therefore exercised on the

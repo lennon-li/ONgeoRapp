@@ -479,7 +479,7 @@ test_that("rasters are packed across the future boundary and survive", {
 })
 
 # --- Map furniture (PHU_simple) -------------------------------------
-# The Link tab map draws bundled furniture layers at load: PHU_simple
+# The map draws bundled furniture layers at load: PHU_simple
 # (checked) at the bottom of the overlay list, with
 # PHU_simple suppressed while the full-resolution phu_boundaries source is
 # selected.
