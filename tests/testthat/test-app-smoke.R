@@ -86,9 +86,13 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
     ),
     "Join|PCode2DA"
   )
+  # In the browser the active marker sits on the <a>, not the <li>: bslib's
+  # navs JS rewrites Shiny's server-rendered markup to Bootstrap 5 form, adding
+  # .nav-item/.nav-link and moving .active down onto the anchor. A `li.active`
+  # selector matches the static HTML and nothing in the live DOM.
   expect_equal(
     app$get_js(
-      "document.querySelector('.top-nav > .tabbable > .nav-tabs > li.active')
+      "document.querySelector('.top-nav > .tabbable > .nav-tabs > li > a.active')
          .textContent.trim()"
     ),
     "Join"
