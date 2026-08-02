@@ -641,16 +641,19 @@ ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
   tags$head(tags$link(rel = "stylesheet", href = "theme.css")),
+  # The logo lives at the top of each tab's own sidebar, not in a page header.
+  # Only one sidebar is on screen at a time, so the two copies never render
+  # together - and a header bar would cost vertical space the map needs.
   tags$div(
-    class = "app-brand",
-    tags$img(src = "logo.png", alt = "ONgeoR")
-  ),
-  bslib::navset_tab(
+    class = "top-nav",
+    bslib::navset_tab(
     bslib::nav_panel(
-      "Link",
+      "Join",
       bslib::layout_sidebar(
         sidebar = bslib::sidebar(
           width = 300,
+          tags$div(class = "sidebar-brand",
+            tags$img(src = "logo.png", alt = "ONgeoR")),
           tags$div(class = "slot-block slot-base",
             selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
             tags$div(class = "slot-meta",
@@ -707,7 +710,11 @@ ui <- bslib::page_fillable(
         bslib::navset_tab(
           bslib::nav_panel(
             "Map",
-            leafletOutput("cw_map", height = "calc(100vh - 170px)")
+            # Chrome above the map: the top-level tab strip plus the inner
+            # Map/Data strip. Was 170px while a header bar carried the logo;
+            # the logo moved back into the sidebar and the section tabs took
+            # its place, which is a little shorter.
+            leafletOutput("cw_map", height = "calc(100vh - 160px)")
           ),
           bslib::nav_panel(
             "Data",
@@ -717,10 +724,12 @@ ui <- bslib::page_fillable(
       )
     ),
     bslib::nav_panel(
-      "Postal codes",
+      "PCode2DA",
       bslib::layout_sidebar(
         sidebar = bslib::sidebar(
           width = 300,
+          tags$div(class = "sidebar-brand",
+            tags$img(src = "logo.png", alt = "ONgeoR")),
           fileInput("postal_file", "Upload a CSV", accept = c(".csv", "text/csv"),
             buttonLabel = "Browse...", placeholder = "CSV with a postal-code column"),
           uiOutput("postal_col_ui"),
@@ -739,6 +748,7 @@ ui <- bslib::page_fillable(
         ),
         DT::dataTableOutput("postal_table")
       )
+    )
     )
   )
 )

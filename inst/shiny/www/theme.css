@@ -1,5 +1,6 @@
 :root {
   --surface-1: #fcfcfb;
+  --surface-2: #eeede8;
   --page: #f9f9f7;
   --text-primary: #0b0b0b;
   --text-secondary: #52514e;
@@ -378,18 +379,45 @@ body {
   width: 68px;
 }
 
-/* Brand logo in the page header, above the tab bar. Moved out of the sidebar
-   when the app grew a second top-level tab - two sidebars would otherwise
-   render the logo twice. Same 68px artwork width as .sidebar-brand, but
-   left-aligned with a little vertical padding rather than centred. */
-.app-brand {
-  padding: 12px 0 4px;
+/* Top-level section tabs (Join / PCode2DA), wrapped in .top-nav. The
+   understated underline style above stays for the nested Map/Data views; this
+   strip is the app's primary navigation and has to read as a tab bar, so it
+   gets folder-style tabs sitting on the content edge. Right-aligned because
+   the left of the strip is empty - the logo is inside the sidebar below it.
+   Every selector is direct-child scoped so the nested Map/Data strip, which is
+   a descendant of .top-nav, keeps the flat style. The chain goes through
+   .tabbable, the wrapper navset_tab() emits around the <ul>; and it ends at
+   `> li > a` rather than .nav-link because the server-rendered markup carries
+   neither .nav-item nor .nav-link - bslib's navs JS adds those in the browser,
+   so a .nav-link selector cannot be checked against the static HTML. */
+.top-nav > .tabbable > .nav-tabs {
+  justify-content: flex-end;
+  gap: 4px;
+  padding-right: 8px;
 }
 
-.app-brand img {
-  display: block;
-  height: auto;
-  width: 68px;
+.top-nav > .tabbable > .nav-tabs > li > a {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--grid) !important;
+  border-radius: 8px 8px 0 0;
+  font-weight: 600;
+  padding: 0.45rem 1.15rem !important;
+}
+
+.top-nav > .tabbable > .nav-tabs > li > a:hover {
+  background: var(--surface-1) !important;
+  color: var(--text-primary) !important;
+}
+
+/* The active tab joins the panel below it: same fill as the content surface,
+   and its bottom border is dropped so the -1px margin lets it sit over the
+   strip's own border rather than being fenced off by it. */
+.top-nav > .tabbable > .nav-tabs > li.active > a,
+.top-nav > .tabbable > .nav-tabs > li > a.active {
+  background: var(--surface-1) !important;
+  border-color: var(--grid) !important;
+  border-bottom-color: transparent !important;
+  color: var(--series-1) !important;
 }
 
 /* Preview gets its own color identity, distinct from the primary Link

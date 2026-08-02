@@ -63,25 +63,36 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   )
   withr::defer(app$stop())
 
-  # The branding moved out of the (now removed) header bar and into the top of
-  # the sidebar, wrapped in .sidebar-brand. bslib renders the sidebar column as
-  # .bslib-sidebar-layout > .sidebar; .sidebar alone is unambiguous here since
-  # the page has exactly one sidebar. Assert the logo lives there.
-  sidebar <- app$get_html(".sidebar")
+  # The branding sits at the top of each tab's own sidebar, wrapped in
+  # .sidebar-brand - never in a page header. There are two sidebars now (one
+  # per section tab), so target the visible one.
+  sidebar <- app$get_html(".tab-pane.active .sidebar")
   expect_match(sidebar, "sidebar-brand", fixed = TRUE)
   expect_match(sidebar, "logo.png", fixed = TRUE)
 
-  # With no title argument, page_sidebar() renders no header bar at all - that
-  # is the point of the change. Assert neither flavour of navbar element (the
-  # div.navbar page_sidebar used to emit, nor a nav.navbar) is present.
+  # No header bar of any kind: neither a navbar element nor the .app-brand div
+  # that briefly carried the logo above the tab strip. A header costs vertical
+  # space the map needs.
   expect_true(app$get_js(
-    "document.querySelector('div.navbar, nav.navbar') === null"
+    "document.querySelector('div.navbar, nav.navbar, .app-brand') === null"
   ))
 
-  # The app still has only the Map and Data views, so the old single-item
-  # "Link" tab must not have come back; scope the check to the tab strip so
-  # unrelated controls cannot trip it.
-  expect_no_match(app$get_html(".nav-tabs"), "Link", fixed = TRUE)
+  # Section tabs are Join (default) and PCode2DA, and they are the direct
+  # children of .top-nav - the nested Map/Data strip lives deeper.
+  expect_equal(
+    app$get_js(
+      "Array.from(document.querySelectorAll('.top-nav > .tabbable > .nav-tabs > li'))
+         .map(function(li) { return li.textContent.trim(); }).join('|')"
+    ),
+    "Join|PCode2DA"
+  )
+  expect_equal(
+    app$get_js(
+      "document.querySelector('.top-nav > .tabbable > .nav-tabs > li.active')
+         .textContent.trim()"
+    ),
+    "Join"
+  )
 
   expect_match(app$get_html("#base_layer"), "base_layer", fixed = TRUE)
   expect_match(
