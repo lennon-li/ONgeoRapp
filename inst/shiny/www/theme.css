@@ -378,6 +378,20 @@ body {
   width: 68px;
 }
 
+/* Brand logo in the page header, above the tab bar. Moved out of the sidebar
+   when the app grew a second top-level tab - two sidebars would otherwise
+   render the logo twice. Same 68px artwork width as .sidebar-brand, but
+   left-aligned with a little vertical padding rather than centred. */
+.app-brand {
+  padding: 12px 0 4px;
+}
+
+.app-brand img {
+  display: block;
+  height: auto;
+  width: 68px;
+}
+
 /* Preview gets its own color identity, distinct from the primary Link
    button: green = "look first" (non-committing), blue = "commit". */
 .btn-preview {

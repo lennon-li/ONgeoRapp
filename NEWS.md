@@ -1,3 +1,13 @@
+# ONgeoRapp (development version)
+
+* The Shiny app gains a second top-level tab, "Postal codes". It is a
+  table-only utility with its own control panel: upload a CSV, name its
+  postal-code column, and join those codes to Ontario dissemination areas via
+  `ONgeoR::resolve_postal()`. The joined table can be previewed and downloaded,
+  along with an R script that reproduces the join. No map or spatial code is
+  involved. The existing spatial linking interface is unchanged and now lives
+  under a "Link" tab.
+
 # ONgeoRapp 0.1.0
 
 * Initial release. The Shiny application was extracted from the `ONgeoR`

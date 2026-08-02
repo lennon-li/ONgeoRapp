@@ -706,3 +706,261 @@ test_that("map.html download bundles PHU_simple alongside the two sources", {
     )
   })
 })
+
+# --- Postal codes tab --------------------------------------------------
+# A table-only utility independent of the crosswalk: upload a CSV, name its
+# postal-code column, join to dissemination areas via ONgeoR::resolve_postal(),
+# preview the joined table, and download it plus a reproducer script. No map.
+
+# Writes a small CSV the postal tab can upload; returns its path. `postal`
+# carries three codes, the third of which the mocked resolve_postal() leaves
+# unmatched so the row-count / unmatched reporting can be exercised.
+postal_fixture_csv <- function(path) {
+  utils::write.csv(
+    data.frame(
+      postal = c("K1A 0B1", "M5V 3L9", "XXX 9Z9"),
+      city = c("Ottawa", "Toronto", "Nowhere"),
+      stringsAsFactors = FALSE
+    ),
+    path, row.names = FALSE
+  )
+  path
+}
+
+# Mock resolve_postal() echoing the input codes back as postal_code so the
+# app's merge() (by.x = user column, by.y = "postal_code") joins cleanly; the
+# third code comes back with NA data columns, i.e. unmatched.
+postal_fixture_resolve <- function(x, all_links = FALSE) {
+  tibble::tibble(
+    postal_code = x,
+    DAUID = c("35060001", "35200001", NA_character_),
+    allocation_weight = c(1, 1, NA_real_),
+    n_contributing_dbs = c(1L, 1L, NA_integer_),
+    census_vintage = c("2021", "2021", NA_character_),
+    source_url = "https://example.test/ongeor-fixture",
+    retrieved_at = as.POSIXct("2026-07-18 00:00:00", tz = "UTC")
+  )
+}
+
+test_that("postal column picker prompts before upload and lists columns after", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  csv_path <- postal_fixture_csv(withr::local_tempfile(fileext = ".csv"))
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    # Before any upload: a muted prompt, and no empty select.
+    before <- rendered_html(output$postal_col_ui)
+    expect_match(before, "Upload a CSV")
+    expect_false(grepl("<select", before, fixed = TRUE))
+
+    session$setInputs(postal_file = list(name = "my.csv", datapath = csv_path))
+
+    after <- rendered_html(output$postal_col_ui)
+    expect_match(after, "postal_col")
+    expect_match(after, "postal")
+    expect_match(after, "city")
+  })
+})
+
+test_that("postal run joins codes, reports row counts, and enables downloads", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  csv_path <- postal_fixture_csv(withr::local_tempfile(fileext = ".csv"))
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal = postal_fixture_resolve,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(postal_file = list(name = "my.csv", datapath = csv_path))
+    # Downloads start as disabled placeholders (no download ids) before any
+    # join has produced rows.
+    before_dl <- rendered_html(output$postal_downloads_ui)
+    expect_false(grepl("id=\"dl_postal_csv\"", before_dl))
+    expect_false(grepl("id=\"dl_postal_script\"", before_dl))
+
+    session$setInputs(postal_col = "postal", postal_all_links = "best", postal_run = 1)
+
+    expect_s3_class(postal_joined(), "data.frame")
+    expect_equal(nrow(postal_joined()), 3)
+    # The user's own columns survive the join alongside the DA columns.
+    expect_true(all(c("postal", "city", "DAUID") %in% colnames(postal_joined())))
+
+    # A silent change in row count is the failure this tab must not have: the
+    # status quotes rows in, rows out, and unmatched codes explicitly.
+    status <- rendered_html(output$postal_status)
+    expect_match(status, "3 input row(s) in", fixed = TRUE)
+    expect_match(status, "3 row(s) out", fixed = TRUE)
+    expect_match(status, "1 postal code(s) did not match", fixed = TRUE)
+
+    # A successful join swaps the placeholders for real download buttons,
+    # which carry their download ids.
+    dl <- rendered_html(output$postal_downloads_ui)
+    expect_match(dl, "id=\"dl_postal_csv\"")
+    expect_match(dl, "id=\"dl_postal_script\"")
+
+    # The CSV download is byte-for-byte the joined object.
+    expected <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(postal_joined(), expected, row.names = FALSE)
+    actual <- output$dl_postal_csv
+    expect_equal(
+      readBin(actual, what = "raw", n = file.info(actual)$size),
+      readBin(expected, what = "raw", n = file.info(expected)$size)
+    )
+  })
+})
+
+test_that("postal reproduce.R is rendered from the uploaded file's original name", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  csv_path <- postal_fixture_csv(withr::local_tempfile(fileext = ".csv"))
+  captured <- new.env(parent = emptyenv())
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal = postal_fixture_resolve,
+    render_postal_reproducer_script = function(input_file, postal_col, output_dir, all_links = TRUE) {
+      captured$input_file <- input_file
+      captured$postal_col <- postal_col
+      captured$all_links <- all_links
+      "SCRIPT_BODY"
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(postal_file = list(name = "original_name.csv", datapath = csv_path))
+    session$setInputs(postal_col = "postal", postal_all_links = "all", postal_run = 1)
+
+    script_file <- output$dl_postal_script
+    expect_equal(readLines(script_file, warn = FALSE), "SCRIPT_BODY")
+    # The ORIGINAL upload name, not the Shiny temp datapath; the column and the
+    # all_links flag are passed through too.
+    expect_identical(captured$input_file, "original_name.csv")
+    expect_identical(captured$postal_col, "postal")
+    expect_true(captured$all_links)
+  })
+})
+
+test_that("a resolve_postal failure is reported in postal_status without crashing", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  csv_path <- postal_fixture_csv(withr::local_tempfile(fileext = ".csv"))
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal = function(x, all_links = FALSE) {
+      rlang::abort("Fixture postal download failed.")
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(postal_file = list(name = "my.csv", datapath = csv_path))
+    session$setInputs(postal_col = "postal", postal_all_links = "best", postal_run = 1)
+
+    expect_null(postal_joined())
+    status <- rendered_html(output$postal_status)
+    expect_match(status, "Join failed", fixed = TRUE)
+    expect_match(status, "Fixture postal download failed", fixed = TRUE)
+    # A failed join leaves the downloads as disabled placeholders (no ids).
+    expect_false(grepl("id=\"dl_postal_csv\"", rendered_html(output$postal_downloads_ui)))
+  })
+})
+
+test_that("an unreadable CSV reports the read error in postal_status", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    missing <- file.path(tempdir(), "does-not-exist.csv")
+    session$setInputs(postal_file = list(name = "bad.csv", datapath = missing))
+
+    expect_null(postal_records())
+    expect_match(
+      rendered_html(output$postal_status),
+      "Could not read the file",
+      fixed = TRUE
+    )
+  })
+})
+
+# Regression, found by joining against the real correspondence: resolve_postal()
+# reports codes normalized to "A1A 1A1" and returns one row per input. Merging
+# on the column as the user typed it therefore dropped every code not already
+# in that form, and duplicate codes put duplicate keys on both sides of the
+# merge and multiplied the rows. Both bugs were invisible to a fixture whose
+# codes are already normalized and distinct, so this one is deliberately messy.
+test_that("postal join survives mixed formatting and duplicate codes", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  csv_path <- withr::local_tempfile(fileext = ".csv")
+  utils::write.csv(
+    data.frame(
+      postal = c("m5v3l9", "M5V 3L9", "k1a 0b1"),
+      city = c("Toronto", "Toronto", "Ottawa"),
+      stringsAsFactors = FALSE
+    ),
+    csv_path, row.names = FALSE
+  )
+
+  # Behaves like the real function in the two ways that matter here: it reports
+  # codes NORMALIZED, and returns one row per input. An echo-only mock joins
+  # cleanly against raw codes and hides the bug.
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal = function(x, all_links = FALSE) {
+      tibble::tibble(
+        postal_code = ONgeoR::normalize_postal_code(x),
+        DAUID = paste0("3520000", seq_along(x)),
+        allocation_weight = 1,
+        n_contributing_dbs = 1L,
+        census_vintage = "2021",
+        source_url = "https://example.test/ongeor-fixture",
+        retrieved_at = as.POSIXct("2026-07-18 00:00:00", tz = "UTC")
+      )
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(postal_file = list(name = "messy.csv", datapath = csv_path))
+    session$setInputs(postal_col = "postal", postal_all_links = "best", postal_run = 1)
+
+    joined <- postal_joined()
+    # Three records in, three records out - not one (formatting dropped) and
+    # not four (duplicate key fan-out).
+    expect_equal(nrow(joined), 3)
+    expect_false(any(is.na(joined$DAUID)))
+    # The user's column is returned as they typed it, not silently rewritten.
+    expect_setequal(joined$postal, c("m5v3l9", "M5V 3L9", "k1a 0b1"))
+    # The internal join key does not leak into the download.
+    expect_false(".postal_key" %in% colnames(joined))
+    expect_match(postal_status(), "3 input row(s) in, 3 row(s) out", fixed = TRUE)
+  })
+})
