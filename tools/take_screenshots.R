@@ -106,8 +106,25 @@ on.exit({
   try(app$stop(), silent = TRUE)
 }, add = TRUE)
 
-# Allow the Shiny session to initialise before interacting
-Sys.sleep(5)
+# Wait until the session is ready: preview_btn must exist and be enabled.
+# A blind sleep is not enough - clicks issued before the observers are bound
+# are lost and preview never starts.
+{
+  waited <- 0
+  repeat {
+    Sys.sleep(2)
+    waited <- waited + 2
+    ready <- js_get(app,
+      "(function() {
+         var b = document.getElementById('preview_btn');
+         return (b && !b.disabled) ? 'yes' : 'no';
+       })()"
+    )
+    if (identical(ready, "yes")) break
+    if (waited >= 60) stop("Preview button never became enabled.")
+  }
+  message("Session ready after ", waited, " s.")
+}
 
 # ---------------------------------------------------------------------------
 # Shot 1: app-link-tab.png
