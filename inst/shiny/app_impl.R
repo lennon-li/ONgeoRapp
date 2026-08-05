@@ -641,114 +641,79 @@ ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
   tags$head(tags$link(rel = "stylesheet", href = "theme.css")),
-  # The logo lives at the top of each tab's own sidebar, not in a page header.
-  # Only one sidebar is on screen at a time, so the two copies never render
-  # together - and a header bar would cost vertical space the map needs.
-  tags$div(
-    class = "top-nav",
-    bslib::navset_tab(
-    bslib::nav_panel(
-      "Join",
-      bslib::layout_sidebar(
-        sidebar = bslib::sidebar(
-          width = 300,
-          tags$div(class = "sidebar-brand",
-            tags$img(src = "logo.png", alt = "ONgeoR")),
-          tags$div(class = "slot-block slot-base",
-            selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
-            tags$div(class = "slot-meta",
-              uiOutput("base_geom_badge"),
-              checkboxInput("base_upload_own", "Use my own file", FALSE)
-            ),
-            conditionalPanel(
-              "input.base_upload_own",
-              fileInput("base_own_file", NULL, buttonLabel = "Browse...",
-                placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-              selectInput("base_own_type", "Layer type",
-                c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-              tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-            )
-          ),
-          tags$div(class = "slot-block slot-overlay",
-            selectInput("overlay_source", "Target layer", choices = source_choices_grouped(), selected = "moh_service_locations"),
-            tags$div(class = "slot-meta",
-              uiOutput("overlay_geom_badge"),
-              checkboxInput("overlay_upload_own", "Use my own file", FALSE)
-            ),
-            conditionalPanel(
-              "input.overlay_upload_own",
-              fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
-                placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-              selectInput("overlay_own_type", "Layer type",
-                c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-              tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-            )
-          ),
-          uiOutput("link_relationship"),
-          uiOutput("link_method_ui"),
-          actionButton("preview_btn", "Preview on map", class = "btn-preview w-100 mb-1"),
-          uiOutput("build_btn_ui"),
-          uiOutput("link_task_status"),
-          tags$hr(),
-          bslib::accordion(
-            open = FALSE,
-            bslib::accordion_panel(
-              tags$span(class = "slot-title slot-title-base", "Source layer style"),
-              uiOutput("base_style_ui"),
-              value = "Source layer style"
-            ),
-            bslib::accordion_panel(
-              tags$span(class = "slot-title slot-title-overlay", "Target layer style"),
-              uiOutput("overlay_style_ui"),
-              value = "Target layer style"
-            )
-          ),
-          tags$hr(),
-          tags$strong("Downloads"),
-          uiOutput("link_downloads_ui")
+  # The logo lives at the top of the sidebar, not in a page header. The app is
+  # a single-purpose linking interface, so the layout can fill the page
+  # directly and a header bar would only cost the map vertical space.
+  bslib::layout_sidebar(
+    sidebar = bslib::sidebar(
+      width = 300,
+      tags$div(class = "sidebar-brand",
+        tags$img(src = "logo.png", alt = "ONgeoR")),
+      tags$div(class = "slot-block slot-base",
+        selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
+        tags$div(class = "slot-meta",
+          uiOutput("base_geom_badge"),
+          checkboxInput("base_upload_own", "Use my own file", FALSE)
         ),
-        bslib::navset_tab(
-          bslib::nav_panel(
-            "Map",
-            # Chrome above the map: the top-level tab strip plus the inner
-            # Map/Data strip. Was 170px while a header bar carried the logo;
-            # the logo moved back into the sidebar and the section tabs took
-            # its place, which is a little shorter.
-            leafletOutput("cw_map", height = "calc(100vh - 160px)")
-          ),
-          bslib::nav_panel(
-            "Data",
-            DT::dataTableOutput("cw_table")
-          )
+        conditionalPanel(
+          "input.base_upload_own",
+          fileInput("base_own_file", NULL, buttonLabel = "Browse...",
+            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
+          selectInput("base_own_type", "Layer type",
+            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
+          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
         )
-      )
-    ),
-    bslib::nav_panel(
-      "PCode2DA",
-      bslib::layout_sidebar(
-        sidebar = bslib::sidebar(
-          width = 300,
-          tags$div(class = "sidebar-brand",
-            tags$img(src = "logo.png", alt = "ONgeoR")),
-          fileInput("postal_file", "Upload a CSV", accept = c(".csv", "text/csv"),
-            buttonLabel = "Browse...", placeholder = "CSV with a postal-code column"),
-          uiOutput("postal_col_ui"),
-          radioButtons("postal_all_links", "Multiple dissemination areas",
-            choices = c("Keep one best link per postal code" = "best",
-                        "Return every link" = "all"), selected = "best"),
-          tags$p(class = "text-muted",
-            paste("About 7.8% of Ontario postal codes span more than one",
-              "dissemination area; \"Return every link\" can give a record",
-              "more than one output row.")),
-          actionButton("postal_run", "Join to dissemination areas", class = "btn-preview w-100 mb-1"),
-          uiOutput("postal_status"),
-          tags$hr(),
-          tags$strong("Downloads"),
-          uiOutput("postal_downloads_ui")
+      ),
+      tags$div(class = "slot-block slot-overlay",
+        selectInput("overlay_source", "Target layer", choices = source_choices_grouped(), selected = "moh_service_locations"),
+        tags$div(class = "slot-meta",
+          uiOutput("overlay_geom_badge"),
+          checkboxInput("overlay_upload_own", "Use my own file", FALSE)
         ),
-        DT::dataTableOutput("postal_table")
+        conditionalPanel(
+          "input.overlay_upload_own",
+          fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
+            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
+          selectInput("overlay_own_type", "Layer type",
+            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
+          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
+        )
+      ),
+      uiOutput("link_relationship"),
+      uiOutput("link_method_ui"),
+      actionButton("preview_btn", "Preview on map", class = "btn-preview w-100 mb-1"),
+      uiOutput("build_btn_ui"),
+      uiOutput("link_task_status"),
+      tags$hr(),
+      bslib::accordion(
+        open = FALSE,
+        bslib::accordion_panel(
+          tags$span(class = "slot-title slot-title-base", "Source layer style"),
+          uiOutput("base_style_ui"),
+          value = "Source layer style"
+        ),
+        bslib::accordion_panel(
+          tags$span(class = "slot-title slot-title-overlay", "Target layer style"),
+          uiOutput("overlay_style_ui"),
+          value = "Target layer style"
+        )
+      ),
+      tags$hr(),
+      tags$strong("Downloads"),
+      uiOutput("link_downloads_ui")
+    ),
+    bslib::navset_tab(
+      bslib::nav_panel(
+        "Map",
+        # Chrome above the map is now only the inner Map/Data strip. The
+        # sidebar logo is outside the map column, so 130px leaves room for
+        # the remaining page and inner-navigation chrome.
+        leafletOutput("cw_map", height = "calc(100vh - 130px)")
+      ),
+      bslib::nav_panel(
+        "Data",
+        DT::dataTableOutput("cw_table")
       )
-    )
     )
   )
 )
@@ -1243,139 +1208,6 @@ server <- function(input, output, session) {
     )
   })
 
-  # --- Postal codes tab ------------------------------------------------
-  # A table-only utility, independent of the crosswalk above: the user
-  # uploads a CSV, names its postal-code column, and joins those codes to
-  # dissemination areas through ONgeoR::resolve_postal(). No map, no sf.
-
-  postal_records <- reactiveVal(NULL)
-  postal_joined <- reactiveVal(NULL)
-  postal_status <- reactiveVal(NULL)
-
-  observeEvent(input$postal_file, {
-    req(input$postal_file)
-    # A missing/unreadable file warns before it errors; muffle the warning so
-    # the error alone is caught and reported in postal_status below.
-    records <- tryCatch(
-      suppressWarnings(utils::read.csv(input$postal_file$datapath,
-        stringsAsFactors = FALSE, check.names = FALSE)),
-      error = function(e) e
-    )
-    if (inherits(records, "error")) {
-      postal_records(NULL)
-      postal_joined(NULL)
-      postal_status(sprintf("Could not read the file: %s", conditionMessage(records)))
-      return()
-    }
-    postal_records(records)
-    # A new file invalidates any previous join - the downloads disable until
-    # the join is run again on this file.
-    postal_joined(NULL)
-    postal_status(NULL)
-  })
-
-  output$postal_col_ui <- renderUI({
-    records <- postal_records()
-    if (is.null(records)) {
-      return(tags$p(class = "text-muted", "Upload a CSV to choose its postal code column."))
-    }
-    selectInput("postal_col", "Postal code column", choices = colnames(records))
-  })
-
-  observeEvent(input$postal_run, {
-    records <- postal_records()
-    req(records, input$postal_col)
-    all_links <- identical(input$postal_all_links, "all")
-    # resolve_postal() reports codes in the correspondence's own "A1A 1A1"
-    # format, so the join key needs the same normalization on this side.
-    # Merging on the column as typed silently drops every code the user did
-    # not already type in that exact form. It also returns a row per input, so
-    # it is asked for each distinct code once - duplicate keys on both sides of
-    # the merge would multiply the rows. Mirrors the reproducer script.
-    keys <- ONgeoR::normalize_postal_code(as.character(records[[input$postal_col]]))
-    codes <- unique(keys)
-    # resolve_postal() downloads on first use (~2 MB, then cached); a failure
-    # there must surface as a status message, not an app crash. Unmatched codes
-    # raise a warning - that is correct behaviour, so it is captured for the
-    # status report but not suppressed.
-    warn_msgs <- character()
-    links <- tryCatch(
-      withCallingHandlers(
-        shiny::withProgress(message = "Joining postal codes", value = 0.5, {
-          ONgeoR::resolve_postal(codes, all_links = all_links)
-        }),
-        warning = function(w) {
-          warn_msgs <<- c(warn_msgs, conditionMessage(w))
-        }
-      ),
-      error = function(e) e
-    )
-    if (inherits(links, "error")) {
-      postal_joined(NULL)
-      postal_status(sprintf("Join failed: %s", conditionMessage(links)))
-      return()
-    }
-    records[[".postal_key"]] <- keys
-    joined <- merge(records, links,
-      by.x = ".postal_key", by.y = "postal_code",
-      all.x = TRUE, sort = FALSE)
-    joined[[".postal_key"]] <- NULL
-    postal_joined(joined)
-    n_unmatched <- sum(is.na(links$DAUID))
-    status <- sprintf(
-      "%s input row(s) in, %s row(s) out, %s postal code(s) did not match.",
-      format(nrow(records), big.mark = ","),
-      format(nrow(joined), big.mark = ","),
-      format(n_unmatched, big.mark = ","))
-    if (length(warn_msgs) > 0) {
-      status <- paste(status, paste(warn_msgs, collapse = " "))
-    }
-    postal_status(status)
-  })
-
-  output$postal_status <- renderUI({
-    msg <- postal_status()
-    req(msg)
-    tags$p(class = "text-muted", msg)
-  })
-
-  output$postal_table <- DT::renderDataTable({
-    joined <- postal_joined()
-    req(joined)
-    joined
-  }, rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
-
-  output$dl_postal_csv <- downloadHandler(
-    filename = function() "postal_joined.csv",
-    content = function(file) {
-      joined <- postal_joined()
-      req(joined)
-      utils::write.csv(joined, file, row.names = FALSE)
-    }
-  )
-  output$dl_postal_script <- downloadHandler(
-    filename = function() "reproduce.R",
-    content = function(file) {
-      req(input$postal_file, input$postal_col)
-      # Pass the uploaded file's ORIGINAL name, not the Shiny temp path, so the
-      # generated script points at the user's own file.
-      writeLines(
-        ONgeoR::render_postal_reproducer_script(
-          input$postal_file$name, input$postal_col, ".",
-          all_links = identical(input$postal_all_links, "all")
-        ),
-        file
-      )
-    }
-  )
-
-  output$postal_downloads_ui <- renderUI({
-    ready <- !is.null(postal_joined()) && nrow(postal_joined()) > 0
-    download_or_disabled(list(
-      list(id = "dl_postal_csv", label = "postal_joined.csv", ready = ready),
-      list(id = "dl_postal_script", label = "reproduce.R", ready = ready)
-    ))
-  })
 }
 
 shiny::shinyApp(ui, server)

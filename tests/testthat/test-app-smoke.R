@@ -63,39 +63,33 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   )
   withr::defer(app$stop())
 
-  # The branding sits at the top of each tab's own sidebar, wrapped in
-  # .sidebar-brand - never in a page header. There are two sidebars now (one
-  # per section tab), so target the visible one.
-  sidebar <- app$get_html(".tab-pane.active .sidebar")
+  # The branding sits at the top of the sidebar, wrapped in .sidebar-brand -
+  # never in a page header.
+  sidebar <- app$get_html(".sidebar")
   expect_match(sidebar, "sidebar-brand", fixed = TRUE)
   expect_match(sidebar, "logo.png", fixed = TRUE)
 
   # No header bar of any kind: neither a navbar element nor the .app-brand div
-  # that briefly carried the logo above the tab strip. A header costs vertical
+  # that briefly carried the logo above the content. A header costs vertical
   # space the map needs.
   expect_true(app$get_js(
     "document.querySelector('div.navbar, nav.navbar, .app-brand') === null"
   ))
 
-  # Section tabs are Join (default) and PCode2DA, and they are the direct
-  # children of .top-nav - the nested Map/Data strip lives deeper.
+  # The page is a single-purpose linking interface, so it has no top-level
+  # section strip. The nested Map/Data strip remains inside the sidebar layout.
   expect_equal(
     app$get_js(
-      "Array.from(document.querySelectorAll('.top-nav > .tabbable > .nav-tabs > li'))
+      "document.querySelector('.top-nav') === null"
+    ),
+    TRUE
+  )
+  expect_equal(
+    app$get_js(
+      "Array.from(document.querySelectorAll('.bslib-sidebar-layout .nav-tabs > li'))
          .map(function(li) { return li.textContent.trim(); }).join('|')"
     ),
-    "Join|PCode2DA"
-  )
-  # In the browser the active marker sits on the <a>, not the <li>: bslib's
-  # navs JS rewrites Shiny's server-rendered markup to Bootstrap 5 form, adding
-  # .nav-item/.nav-link and moving .active down onto the anchor. A `li.active`
-  # selector matches the static HTML and nothing in the live DOM.
-  expect_equal(
-    app$get_js(
-      "document.querySelector('.top-nav > .tabbable > .nav-tabs > li > a.active')
-         .textContent.trim()"
-    ),
-    "Join"
+    "Map|Data"
   )
 
   expect_match(app$get_html("#base_layer"), "base_layer", fixed = TRUE)
