@@ -1,8 +1,9 @@
 Package: ONgeoRapp
 Title: Shiny Application for Ontario Geography Linking with 'ONgeoR'
 Version: 0.1.0
-Authors@R:
-    person("Lennon", "Li", email = "lennon.yeli@gmail.com", role = c("aut", "cre"))
+Authors@R: c(
+    person("Lennon", "Li", email = "lennon.yeli@gmail.com", role = c("aut", "cre")),
+    person("Steven", "Johnson", role = "aut"))
 Description: Provides the interactive Shiny application companion to the
     'ONgeoR' package. Users pick a source layer and a target layer from the
     Ontario Land Information Ontario (LIO) registry, and the geometry pair
