@@ -1,3 +1,23 @@
+test_that("layer pickers offer only geometry-appropriate choices", {
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  app_env <- load_shiny_app_env()
+
+  expect_named(app_env$source_choices_grouped(), "Polygons")
+  expect_setequal(
+    unname(unlist(app_env$source_choices_grouped())),
+    c("base_polygon", "other_polygon")
+  )
+  expect_named(app_env$target_choices_grouped(), "Points")
+  expect_setequal(
+    unname(unlist(app_env$target_choices_grouped())),
+    c("overlay_point", "postal_upload")
+  )
+})
+
 test_that("source selections update geometry and relationship displays", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
@@ -516,10 +536,8 @@ test_that("rasters are packed across the future boundary and survive", {
 })
 
 # --- Map furniture (PHU_simple) -------------------------------------
-# The map draws bundled furniture layers at load: PHU_simple
-# (checked) at the bottom of the overlay list, with
-# PHU_simple suppressed while the full-resolution phu_boundaries source is
-# selected.
+# The map draws the bundled PHU_simple furniture layer at load, suppressing it
+# while either full-resolution PHU vintage is drawn.
 
 # Overlay groups of a built leaflet widget, in layer-control order. The
 # widget stores every operation as list(method = ..., args = ...) with
@@ -566,10 +584,8 @@ test_that("PHU_simple furniture is on the map at load with no user input", {
     )
     map <- link_map()
     # Defaults selected but nothing previewed: furniture must still be drawn.
-    expect_identical(furniture_test_overlay_groups(map), c("PHU_simple", "HIVE"))
-    # PHU_simple starts checked; HIVE starts hidden.
+    expect_identical(furniture_test_overlay_groups(map), "PHU_simple")
     expect_false("PHU_simple" %in% furniture_test_hidden_groups(map))
-    expect_true("HIVE" %in% furniture_test_hidden_groups(map))
   })
 })
 
@@ -628,7 +644,7 @@ test_that("no overlay group is ever literally 'null'", {
   })
 })
 
-test_that("PHU_simple furniture is suppressed when phu_boundaries is selected", {
+test_that("PHU_simple furniture is suppressed for either drawn PHU vintage", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
 
@@ -644,19 +660,10 @@ test_that("PHU_simple furniture is suppressed when phu_boundaries is selected", 
   # registry defines only base_polygon/overlay_point/other_polygon.
   app_env <- load_shiny_app_env()
 
-  expect_named(app_env$furniture_layers(character(0)), c("PHU_simple", "HIVE"))
-  expect_named(
-    app_env$furniture_layers(c("phu_boundaries", "moh_service_locations")),
-    "HIVE"
-  )
-  expect_named(
-    app_env$furniture_layers(c("base_polygon", "phu_boundaries")),
-    "HIVE"
-  )
-  expect_length(
-    app_env$furniture_layers(c("phu_boundaries", "hive")),
-    0L
-  )
+  expect_named(app_env$furniture_layers(character(0)), "PHU_simple")
+  expect_length(app_env$furniture_layers(c("phu_boundaries", "moh_service_locations")), 0L)
+  expect_length(app_env$furniture_layers(c("base_polygon", "phu_boundaries")), 0L)
+  expect_length(app_env$furniture_layers("phu_boundaries_pre2025"), 0L)
 
   # REGRESSION GUARD for the bug found by running the app 2026-07-20:
   # phu_boundaries is the app's DEFAULT base layer, so keying suppression off
@@ -669,29 +676,8 @@ test_that("PHU_simple furniture is suppressed when phu_boundaries is selected", 
     )
     expect_identical(
       furniture_test_overlay_groups(link_map()),
-      c("PHU_simple", "HIVE")
+      "PHU_simple"
     )
-  })
-})
-
-# HIVE is drawn as furniture (unchecked) so the user can toggle it on
-# without a retrieval round-trip. It is suppressed when the live hive
-# source is actually drawn as a selected layer.
-test_that("hive furniture is present but hidden at load", {
-  skip_if_not_installed("shiny")
-  skip_if_not_installed("bslib")
-
-  testthat::local_mocked_bindings(
-    list_sources = shiny_fixture_registry,
-    get_source = shiny_fixture_metadata,
-    .package = "ONgeoR"
-  )
-  server <- load_shiny_server()
-
-  shiny::testServer(server, {
-    map <- link_map()
-    expect_true("HIVE" %in% furniture_test_overlay_groups(map))
-    expect_true("HIVE" %in% furniture_test_hidden_groups(map))
   })
 })
 
@@ -726,7 +712,7 @@ test_that("map.html download bundles PHU_simple alongside the two sources", {
     # list.
     expect_identical(
       furniture_test_overlay_groups(link_map()),
-      c("Source layer", "Target layer", "PHU_simple", "HIVE")
+      c("Source layer", "Target layer", "PHU_simple")
     )
 
     map_file <- output$dl_cw_map

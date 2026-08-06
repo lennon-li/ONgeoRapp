@@ -57,33 +57,32 @@ source_choice_labels <- function(sources) {
 
 # Grouped-choices form for use with selectInput's optgroup support:
 # list("Polygons" = c(label = id, ...), "Points" = c(...), "Rasters" = c(...)).
-# Any geography_type outside boundary/facility/raster is bucketed into an
-# "Other" group, which is only added if such sources exist.
+# The source picker accepts only boundary and raster layers; facilities belong
+# in the point-first target picker instead.
 source_choices_grouped <- function() {
   sources <- ONgeoR::list_sources()
+  sources <- sources[sources$geography_type %in% c("boundary", "raster"), ]
   labels <- source_choice_labels(sources)
   values <- stats::setNames(sources$source_id, labels)
 
   group_of <- vapply(sources$geography_type, function(gt) {
     switch(gt,
       boundary = "Polygons",
-      facility = "Points",
-      raster   = "Rasters",
-      "Other")
+      raster = "Rasters")
   }, character(1))
 
-  group_order <- c("Polygons", "Points", "Rasters", "Other")
+  group_order <- c("Polygons", "Rasters")
   groups <- lapply(group_order, function(g) values[group_of == g])
   names(groups) <- group_order
   groups[lengths(groups) > 0]
 }
 
 target_choices_grouped <- function() {
-  groups <- source_choices_grouped()
-  points <- groups[["Points"]]
-  if (is.null(points)) points <- c()
-  groups[["Points"]] <- c(points, c("Upload postal codes" = "postal_upload"))
-  groups
+  sources <- ONgeoR::list_sources()
+  sources <- sources[sources$geography_type == "facility", ]
+  labels <- source_choice_labels(sources)
+  points <- stats::setNames(sources$source_id, labels)
+  list("Points" = c(points, "Upload postal codes" = "postal_upload"))
 }
 
 # Removes `exclude_id` from whichever group of a grouped-choices list
@@ -846,18 +845,12 @@ furniture_layer <- function(id) {
   .furniture_cache[[id]]
 }
 
-# Furniture layers ship in inst/extdata and render at app load with no
-# network call. PHU_simple starts visible; HIVE starts hidden (unchecked
-# in the layers control) but is always present so the user can toggle it
-# on without a retrieval round-trip. Each is suppressed when its live,
-# full-resolution counterpart is actually drawn as a selected source.
+# PHU_simple ships in inst/extdata and renders at app load with no network
+# call. It is suppressed when either live PHU vintage is actually drawn.
 furniture_layers <- function(selected_ids = character()) {
   layers <- list()
-  if (!"phu_boundaries" %in% selected_ids) {
+  if (!any(c("phu_boundaries", "phu_boundaries_pre2025") %in% selected_ids)) {
     layers[["PHU_simple"]] <- furniture_layer("PHU_simple")
-  }
-  if (!"hive" %in% selected_ids) {
-    layers[["HIVE"]] <- furniture_layer("HIVE")
   }
   layers
 }
@@ -981,23 +974,8 @@ ui <- bslib::page_fillable(
       width = 300,
       tags$div(class = "sidebar-brand",
         tags$img(src = "logo.png", alt = "ONgeoR")),
-      tags$div(class = "slot-block slot-base",
-        selectInput("base_layer", "Source layer", choices = source_choices_grouped(), selected = "phu_boundaries"),
-        tags$div(class = "slot-meta",
-          uiOutput("base_geom_badge"),
-          checkboxInput("base_upload_own", "Use my own file", FALSE)
-        ),
-        conditionalPanel(
-          "input.base_upload_own",
-          fileInput("base_own_file", NULL, buttonLabel = "Browse...",
-            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-          selectInput("base_own_type", "Layer type",
-            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-        )
-      ),
       tags$div(class = "slot-block slot-overlay",
-        selectInput("overlay_source", "Target layer", choices = target_choices_grouped(), selected = "moh_service_locations"),
+        selectInput("overlay_source", "1. Target layer (points)", choices = target_choices_grouped(), selected = "moh_service_locations"),
         tags$div(class = "slot-meta",
           uiOutput("overlay_geom_badge"),
           checkboxInput("overlay_upload_own", "Use my own file", FALSE)
@@ -1011,6 +989,21 @@ ui <- bslib::page_fillable(
           tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
         ),
         uiOutput("postal_upload_ui")
+      ),
+      tags$div(class = "slot-block slot-base",
+        selectInput("base_layer", "2. Source layer to join from", choices = source_choices_grouped(), selected = "phu_boundaries"),
+        tags$div(class = "slot-meta",
+          uiOutput("base_geom_badge"),
+          checkboxInput("base_upload_own", "Use my own file", FALSE)
+        ),
+        conditionalPanel(
+          "input.base_upload_own",
+          fileInput("base_own_file", NULL, buttonLabel = "Browse...",
+            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
+          selectInput("base_own_type", "Layer type",
+            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
+          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
+        )
       ),
       uiOutput("link_relationship"),
       uiOutput("link_method_ui"),
@@ -1037,6 +1030,7 @@ ui <- bslib::page_fillable(
       uiOutput("link_downloads_ui")
     ),
     bslib::navset_tab(
+      id = "main_tabs",
       bslib::nav_panel(
         "Map",
         # Chrome above the map is now only the inner Map/Data strip. The
@@ -1046,6 +1040,7 @@ ui <- bslib::page_fillable(
       ),
       bslib::nav_panel(
         "Data",
+        value = "data",
         DT::dataTableOutput("cw_table")
       )
     )
@@ -1053,6 +1048,10 @@ ui <- bslib::page_fillable(
 )
 
 server <- function(input, output, session) {
+
+  # Keep results unavailable until a join has actually completed. nav_hide()
+  # and nav_show() are bslib's supported wrappers around Shiny tab updates.
+  bslib::nav_hide("main_tabs", "data", session = session)
 
   # --- Async tasks (ExtendedTask; requires shiny >= 1.8.0) -----------
 
@@ -1622,6 +1621,7 @@ server <- function(input, output, session) {
     cw_result$overlay_sf  <- unpack_spatial(result$overlay_sf)
     link_state("completed")
     link_state_detail("Results and downloads are ready.")
+    bslib::nav_show("main_tabs", "data", session = session)
   }, ignoreInit = TRUE)
 
   # The map renders at app load - before any preview - carrying
@@ -1710,6 +1710,62 @@ server <- function(input, output, session) {
     }
   )
 
+  # ESRI Shapefile variant of the merge, for tools that cannot read
+  # GeoPackage. Shapefile is lossier than GPKG: field names are limited to
+  # 10 characters and it cannot distinguish "" from NA. Attribute names are
+  # therefore shortened to unique 10-character names before writing (sf's own
+  # abbreviation can emit names longer than 10 characters that collide once
+  # GDAL truncates them further, which hard-fails the write), and the zip
+  # also ships field_names.csv mapping each original name to the name
+  # actually found in the written .dbf. A shapefile is 4+ sidecar files
+  # (.shp/.shx/.dbf/.prj), so the download is a zip.
+  shp_field_names <- function(nms) {
+    out <- character(0)
+    for (nm in nms) {
+      candidate <- substr(nm, 1L, 10L)
+      if (candidate %in% out) {
+        k <- 1L
+        repeat {
+          candidate <- sprintf("%s%03d", substr(nm, 1L, 7L), k)
+          if (!candidate %in% out) break
+          k <- k + 1L
+        }
+      }
+      out <- c(out, candidate)
+    }
+    out
+  }
+  output$dl_cw_shp <- downloadHandler(
+    filename = function() "target_shapefile.zip",
+    content = function(file) {
+      merged <- merge_target_attributes(
+        cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
+      )
+      req(merged)
+      original <- setdiff(names(merged), attr(merged, "sf_column"))
+      all_names <- names(merged)
+      all_names[match(original, all_names)] <- shp_field_names(original)
+      names(merged) <- all_names
+      staging <- tempfile("shp_stage")
+      dir.create(staging)
+      on.exit(unlink(staging, recursive = TRUE), add = TRUE)
+      shp_path <- file.path(staging, "target.shp")
+      suppressWarnings(sf::st_write(merged, shp_path, quiet = TRUE))
+      stored <- sf::st_read(shp_path, quiet = TRUE)
+      utils::write.csv(
+        data.frame(
+          original = original,
+          truncated = setdiff(names(stored), attr(stored, "sf_column"))
+        ),
+        file.path(staging, "field_names.csv"),
+        row.names = FALSE
+      )
+      old_wd <- setwd(staging)
+      on.exit(setwd(old_wd), add = TRUE)
+      utils::zip(file, files = list.files(staging))
+    }
+  )
+
   output$dl_cw_csv <- downloadHandler(
     filename = function() if (!is.null(cw_result$linked)) "linked.csv" else "mapping.csv",
     content = function(file) {
@@ -1765,10 +1821,12 @@ server <- function(input, output, session) {
     shapes_ready <- link_ready && !is.null(cw_result$overlay_sf) &&
       !inherits(cw_result$overlay_sf, "SpatRaster")
     tagList(
-      # Two-column grid; the five buttons leave the last-row orphan on
-      # Script, which is the item most often disabled anyway.
+      # Two-column grid; SHP sits beside Shapes so the two vector formats
+      # pair off and the six buttons fill three even rows.
       download_or_disabled(list(
         list(id = "dl_cw_target", label = "Shapes", title = "target.gpkg",
+          ready = shapes_ready),
+        list(id = "dl_cw_shp", label = "SHP", title = "target_shapefile.zip",
           ready = shapes_ready),
         list(id = "dl_cw_map", label = "Map", title = "map.html",
           ready = !is.null(cw_result$base_sf)),
