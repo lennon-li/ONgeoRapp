@@ -499,6 +499,41 @@ collapse_crosswalk_best_match <- function(crosswalk) {
   crosswalk[sort(keep), , drop = FALSE]
 }
 
+# link() returns one row per sampled cell or point, so a polygon target would
+# otherwise appear in the exported layer once per cell (1260 rows for 2 targets
+# in a representative run) - which breaks symbology in desktop GIS and makes
+# the file inconsistent with the other run types, all of which are one row per
+# target. Reduce to one row per target, aligned to `target_sf` row order so the
+# geometry never needs reordering: numeric columns become their mean across the
+# target's cells, non-numeric columns (run provenance, constant within a
+# target) keep their first value, and `linked_cells` records how many rows were
+# reduced. Targets with no linked rows get NA attributes and a count of 0.
+aggregate_linked_by_target <- function(link_attrs, row_of_target, n_targets) {
+  rows_for <- function(i) which(row_of_target == i)
+  reduced <- lapply(link_attrs, function(column) {
+    if (is.numeric(column)) {
+      vapply(seq_len(n_targets), function(i) {
+        values <- column[rows_for(i)]
+        if (all(is.na(values))) NA_real_ else mean(values, na.rm = TRUE)
+      }, numeric(1))
+    } else {
+      vapply(seq_len(n_targets), function(i) {
+        values <- column[rows_for(i)]
+        if (length(values) == 0L) NA_character_ else as.character(values[1L])
+      }, character(1))
+    }
+  })
+  out <- if (length(reduced) > 0L) {
+    as.data.frame(reduced, stringsAsFactors = FALSE, check.names = FALSE)
+  } else {
+    data.frame(row.names = seq_len(n_targets))
+  }
+  # tabulate() ignores NA, which is exactly the unmatched-target case.
+  out$linked_cells <- tabulate(row_of_target, nbins = n_targets)
+  rownames(out) <- NULL
+  out
+}
+
 # Builds the "Shapes" download content: the UI Target layer's own geometry
 # with the joined attributes merged on. Dispatches on the table schema,
 # because the join key differs by run type (all verified empirically against
@@ -509,9 +544,9 @@ collapse_crosswalk_best_match <- function(crosswalk) {
 #   * summarise_by_target table (carries target_id): already one row per
 #     target; join target_id against the target sf's resolved id column.
 #   * raster linked table (neither): carries the target's id column under its
-#     raw name; one row per sampled point/cell, so the join below (match()
-#     from the target side) keeps each target's first matching row, and
-#     unmatched targets keep NA attributes.
+#     raw name (or `.y`-suffixed after an st_join collision), one row per
+#     sampled point/cell, so it is aggregated to one row per target by
+#     aggregate_linked_by_target() before merging.
 # Returns NULL when there is nothing to merge; the download guard req()s it,
 # and the button readiness mirrors the same condition.
 merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) {
@@ -534,11 +569,11 @@ merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) 
     idx <- match(as.character(target_sf[[id_col]]), as.character(table$from_id))
     attrs <- as.data.frame(table[idx, , drop = FALSE])
   } else if (has_rows(crosswalk) && "target_id" %in% names(crosswalk)) {
-    id_col <- ONgeoR:::layer_id_col(target_sf)
+    id_col <- ONgeoR::layer_id_col(target_sf)
     idx <- match(as.character(target_sf[[id_col]]), as.character(crosswalk$target_id))
     attrs <- as.data.frame(crosswalk[idx, , drop = FALSE])
   } else if (has_rows(linked)) {
-    id_col <- ONgeoR:::layer_id_col(target_sf)
+    id_col <- ONgeoR::layer_id_col(target_sf)
     join_col <- if (id_col %in% names(linked)) {
       id_col
     } else if (paste0(id_col, ".y") %in% names(linked)) {
@@ -552,21 +587,15 @@ merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) 
     }
     key_values <- as.character(target_sf[[id_col]])
     row_of_target <- match(as.character(linked[[join_col]]), key_values)
-    valid <- !is.na(row_of_target)
     # The linked table re-states the target's own attribute columns; the
     # geometry already carries those, so keep only the new columns (sampled
     # values and provenance).
     target_copy <- names(linked) %in% names(target_sf) |
       sub("\\.y$", "", names(linked)) %in% names(target_sf)
     link_attrs <- as.data.frame(linked[, !target_copy, drop = FALSE])
-    matched <- unique(row_of_target[valid])
-    unmatched <- setdiff(seq_len(nrow(target_sf)), matched)
-    target_sf <- target_sf[c(row_of_target[valid], unmatched), ]
-    attrs <- rbind(
-      link_attrs[valid, , drop = FALSE],
-      link_attrs[rep(NA_integer_, length(unmatched)), , drop = FALSE]
+    attrs <- aggregate_linked_by_target(
+      link_attrs, row_of_target, nrow(target_sf)
     )
-    rownames(attrs) <- NULL
   } else {
     return(NULL)
   }
@@ -803,8 +832,8 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
   if (nrow(pairs) == 0) {
     return(NULL)
   }
-  source_id_col <- ONgeoR:::layer_id_col(source_sf)
-  target_id_col <- ONgeoR:::layer_id_col(target_sf)
+  source_id_col <- ONgeoR::layer_id_col(source_sf)
+  target_id_col <- ONgeoR::layer_id_col(target_sf)
   source_idx <- match(pairs$source_id, as.character(source_sf[[source_id_col]]))
   target_idx <- match(pairs$target_id, as.character(target_sf[[target_id_col]]))
   keep <- !is.na(source_idx) & !is.na(target_idx)

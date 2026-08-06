@@ -971,6 +971,42 @@ test_that("best-match collapse keeps one deterministic row per target", {
   expect_identical(out, env$collapse_crosswalk_best_match(pairs))
 })
 
+test_that("linked aggregation reduces cells to one row per target", {
+  env <- load_shiny_app_env()
+  # Three targets; target 1 has three cells, target 2 has one, target 3 none.
+  link_attrs <- data.frame(
+    band_1 = c(10, 20, 30, 7),
+    band_2 = c(1, NA, 5, 2),
+    retrieved_at = rep("2026-08-06", 4),
+    stringsAsFactors = FALSE
+  )
+  row_of_target <- c(1L, 1L, 1L, 2L)
+
+  out <- env$aggregate_linked_by_target(link_attrs, row_of_target, 3L)
+
+  expect_equal(nrow(out), 3L)
+  # numeric columns reduce to the mean across the target's cells.
+  expect_equal(out$band_1, c(20, 7, NA))
+  # NA cells are skipped rather than poisoning the mean.
+  expect_equal(out$band_2, c(3, 2, NA))
+  # non-numeric provenance keeps its first value; unmatched target gets NA.
+  expect_equal(out$retrieved_at, c("2026-08-06", "2026-08-06", NA))
+  # cell counts, including the unmatched target.
+  expect_equal(out$linked_cells, c(3L, 1L, 0L))
+})
+
+test_that("linked aggregation ignores cells matching no target", {
+  env <- load_shiny_app_env()
+  link_attrs <- data.frame(band_1 = c(10, 99, 20))
+  # The middle cell fell outside every target, so match() left NA.
+  out <- env$aggregate_linked_by_target(link_attrs, c(1L, NA, 1L), 1L)
+
+  expect_equal(nrow(out), 1L)
+  expect_equal(out$band_1, 15)
+  # the out-of-target cell is excluded from both the mean and the count.
+  expect_equal(out$linked_cells, 2L)
+})
+
 test_that("build_crosswalk merge collapses pairs and joins on from_id_col", {
   env <- load_shiny_app_env()
   target <- fixture_points()
