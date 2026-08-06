@@ -1,0 +1,85 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+name: manifest-freshness
+
+# Connect Cloud takes the app files from this repository's branch tip but
+# resolves ONgeoR from the RemoteSha recorded in inst/shiny/manifest.json. If
+# ONgeoR has moved since that SHA the deploy silently serves new app files
+# against a stale package - no error, just wrong behaviour.
+#
+# NOTE - this differs from the pre-split version of this check. When the app
+# lived inside the ONgeoR repository the pinned SHA was a commit in this repo's
+# own history, so the check was a local `git diff SHA..HEAD -- R/`. After the
+# split the pinned SHA belongs to lennon-li/ONgeoR and is NOT in this
+# repository's history, so the comparison has to be made against that
+# repository's tip instead.
+
+jobs:
+  manifest-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the manifest pins the current ONgeoR tip
+        run: |
+          set -euo pipefail
+          MANIFEST=inst/shiny/manifest.json
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "No $MANIFEST - nothing to check."
+            exit 0
+          fi
+
+          SHA=$(jq -r '.packages.ONgeoR.description.RemoteSha // empty' "$MANIFEST")
+          if [ -z "$SHA" ]; then
+            echo "::error::Could not read ONgeoR's RemoteSha from $MANIFEST."
+            echo "Regenerate it with rsconnect::writeManifest() after installing"
+            echo "ONgeoR from GitHub, so DESCRIPTION carries RemoteType/RemoteSha."
+            echo "A manifest generated from a LOCAL source install is rejected."
+            exit 1
+          fi
+
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/lennon-li/ONgeoR.git ongeor-src
+          UPSTREAM=$(git -C ongeor-src rev-parse origin/main)
+
+          echo "manifest pins ONgeoR: $SHA"
+          echo "ONgeoR main tip:      $UPSTREAM"
+
+          if ! git -C ongeor-src cat-file -e "${SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Pinned commit $SHA is not in ONgeoR's history."
+            echo "The manifest points at a commit that no longer exists"
+            echo "(rewritten history?). Regenerate it against the current tip."
+            exit 1
+          fi
+
+          # Only package source matters. The manifest necessarily lags ONgeoR's
+          # tip by any commit that did not touch R/, DESCRIPTION or NAMESPACE
+          # (docs, CI, README), and failing on those would be noise.
+          CHANGED=$(git -C ongeor-src diff --name-only "${SHA}..${UPSTREAM}" -- R/ DESCRIPTION NAMESPACE)
+
+          if [ -n "$CHANGED" ]; then
+            echo "::error::ONgeoR package source changed since the manifest's pinned SHA."
+            echo ""
+            echo "Changed in ONgeoR since ${SHA}:"
+            echo "$CHANGED" | sed 's/^/  /'
+            echo ""
+            echo "Connect Cloud would serve this app against the OLD package."
+            echo ""
+            echo "Regenerate the manifest:"
+            echo ""
+            echo "  1. Rscript -e 'pak::pkg_install(\"github::lennon-li/ONgeoR\")'"
+            echo "  2. Rscript -e 'rsconnect::writeManifest(appDir = \"inst/shiny\", appPrimaryDoc = \"app.R\")'"
+            echo "  3. confirm the new RemoteSha matches ONgeoR's tip, then commit and push"
+            echo ""
+            echo "A manifest generated from a LOCAL source install is rejected -"
+            echo "ONgeoR must be installed from GitHub so DESCRIPTION carries"
+            echo "RemoteType: github and RemoteSha."
+            exit 1
+          fi
+
+          echo "OK - the manifest pins the current ONgeoR tip."

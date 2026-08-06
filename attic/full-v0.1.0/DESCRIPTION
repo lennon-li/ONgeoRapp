@@ -1,0 +1,50 @@
+Package: ONgeoRapp
+Title: Shiny Application for Ontario Geography Linking with 'ONgeoR'
+Version: 0.1.0
+Authors@R: c(
+    person("Lennon", "Li", email = "lennon.yeli@gmail.com", role = c("aut", "cre")),
+    person("Steven", "Johnson", role = "aut"))
+Description: Provides the interactive Shiny application companion to the
+    'ONgeoR' package. Users pick a source layer and a target layer from the
+    Ontario Land Information Ontario (LIO) registry, and the geometry pair
+    alone determines the linking operation (polygon intersection, nearest
+    point matching, containment, or raster sampling) with no rule for the
+    user to choose. The application renders both layers on a map, shows the
+    resulting linked table, and exports the mapping, pair table, map, and a
+    reproducer script. Data is retrieved at runtime by 'ONgeoR'; none is
+    bundled here.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+URL: https://github.com/lennon-li/ONgeoRapp
+BugReports: https://github.com/lennon-li/ONgeoRapp/issues
+Depends:
+    R (>= 4.1)
+Imports:
+    bslib,
+    DT,
+    future,
+    htmlwidgets,
+    later,
+    leaflet,
+    ONgeoR,
+    promises,
+    readxl,
+    rlang,
+    sf,
+    shiny (>= 1.8.0),
+    terra,
+    tibble
+Suggests:
+    chromote,
+    knitr,
+    pkgdown,
+    rmarkdown,
+    shinytest2,
+    testthat (>= 3.0.0),
+    withr
+Remotes:
+    lennon-li/ONgeoR
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0
