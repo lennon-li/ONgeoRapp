@@ -1,5 +1,18 @@
 # ONgeoRapp (development version)
 
+* The Join sidebar now offers a "Shapes" download (`target.gpkg`): the target
+  layer's own geometry as a GeoPackage with the joined attributes merged onto
+  it. For intersection and nearest runs the target-level table is joined
+  directly; for `build_crosswalk()` runs each target's best pair is kept
+  (highest coverage, then lowest match distance, ties by first occurrence);
+  for raster runs the sampled values are joined onto the vector target. The
+  button stays disabled when the target layer is a raster, which has no
+  attribute table to merge onto.
+
+* The sidebar downloads are laid out as a two-column grid with shortened
+  labels (Shapes, Map, Table, Pairs, Script); each button's real filename is
+  shown as a tooltip.
+
 * "Upload postal codes" is now available as a target layer option in the Shiny
   app. Upload a CSV or Excel file containing postal codes; the app auto-detects
   the postal code column, resolves codes to point coordinates via

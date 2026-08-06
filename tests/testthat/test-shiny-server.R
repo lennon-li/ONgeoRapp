@@ -947,3 +947,215 @@ test_that("selecting postal_upload does not error in geom_kind or geo_badge", {
     expect_match(rel_html, "Point-in-boundary containment")
   })
 })
+
+# --- Target-geometry download (target.gpkg) ------------------------------
+
+test_that("best-match collapse keeps one deterministic row per target", {
+  env <- load_shiny_app_env()
+  pairs <- tibble::tibble(
+    from_id = c("A", "A", "A", "B", "B", "C", "C"),
+    coverage = c(0.2, 0.9, 0.5, NA, NA, NA, NA),
+    match_distance_km = c(NA, NA, NA, 5, 2, NA, NA),
+    to_id = c("x1", "x2", "x3", "y1", "y2", "z1", "z2")
+  )
+  out <- env$collapse_crosswalk_best_match(pairs)
+  expect_equal(nrow(out), 3L)
+  expect_equal(out$from_id, c("A", "B", "C"))
+  # coverage path: highest coverage wins (A keeps the 0.9 row).
+  expect_equal(out$to_id[out$from_id == "A"], "x2")
+  # distance fallback: coverage all NA, lowest distance wins (B keeps 2).
+  expect_equal(out$to_id[out$from_id == "B"], "y2")
+  # tie: coverage and distance both NA, first occurrence wins (C keeps z1).
+  expect_equal(out$to_id[out$from_id == "C"], "z1")
+  # deterministic across runs.
+  expect_identical(out, env$collapse_crosswalk_best_match(pairs))
+})
+
+test_that("build_crosswalk merge collapses pairs and joins on from_id_col", {
+  env <- load_shiny_app_env()
+  target <- fixture_points()
+  cw <- tibble::tibble(
+    from_id = c("1", "1", "2"),
+    from_name = c("p1", "p1", "p2"),
+    from_source = "src",
+    to_id = c("P1", "P2", "P1"),
+    to_name = c("U1", "U2", "U1"),
+    to_source = "base",
+    match_method = "within",
+    match_distance_km = NA_real_,
+    coverage = c(0.3, 0.9, NA),
+    from_id_col = "point_id",
+    to_id_col = "PHU_ID",
+    source_url_from = "https://example.test",
+    source_url_to = "https://example.test",
+    retrieved_at = as.POSIXct("2026-08-06", tz = "UTC")
+  )
+  merged <- env$merge_target_attributes(target, crosswalk = cw)
+  expect_s3_class(merged, "sf")
+  expect_equal(nrow(merged), nrow(target))
+  # point 1 had two pairs; the 0.9-coverage row (to_id P2) wins.
+  expect_equal(merged$to_id[merged$point_id == 1], "P2")
+  expect_equal(merged$to_id[merged$point_id == 2], "P1")
+  # unmatched targets keep their geometry with NA attributes.
+  expect_true(is.na(merged$to_id[merged$point_id == 3]))
+})
+
+test_that("target.gpkg round-trips target geometry with merged attributes", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+  drivers <- sf::st_drivers()
+  skip_if(!("GPKG" %in% drivers$name), "GPKG driver not available")
+
+  # Two overlapping polygon layers in long-lat (4326), mirroring
+  # fixture_overlap_layers()'s shares (F1 fully in T1; F2 split 0.25/0.75
+  # across T1/T2) at a 0.1-degree scale. 4326 keeps the preview's map
+  # render warning-free; build_intersection() reprojects internally for its
+  # area arithmetic.
+  lonlat_square <- function(x1, x2, y1, y2) sf::st_polygon(list(rbind(
+    c(x1, y1), c(x2, y1), c(x2, y2), c(x1, y2), c(x1, y1)
+  )))
+  src_poly <- fixture_provenance(sf::st_sf(
+    SRC_ID = c("F1", "F2"),
+    SRC_NAME = c("From 1", "From 2"),
+    geometry = sf::st_sfc(
+      lonlat_square(-79.3, -79.2, 44.0, 44.1),
+      lonlat_square(-79.2, -79.1, 44.0, 44.1),
+      crs = 4326
+    )
+  ))
+  tgt_poly <- fixture_provenance(sf::st_sf(
+    TGT_ID = c("T1", "T2"),
+    TGT_NAME = c("To 1", "To 2"),
+    geometry = sf::st_sfc(
+      lonlat_square(-79.3, -79.175, 44.0, 44.1),
+      lonlat_square(-79.175, -79.1, 44.0, 44.1),
+      crs = 4326
+    )
+  ))
+  registry <- tibble::tibble(
+    source_id = c("src_poly", "tgt_poly"),
+    name = c("Source Poly", "Target Poly"),
+    geography_type = c("boundary", "boundary"),
+    feature_count = c(nrow(src_poly), nrow(tgt_poly))
+  )
+  poly_layers <- list(src_poly = src_poly, tgt_poly = tgt_poly)
+  metadata <- function(source_id) {
+    row <- registry[registry$source_id == source_id, , drop = FALSE]
+    list(
+      name = row$name[[1]],
+      service_layer = source_id,
+      geography_type = row$geography_type[[1]],
+      feature_count = row$feature_count[[1]],
+      key_fields = list(id = "id", name = "name"),
+      license = "test fixture",
+      source_url = "https://example.test/ongeor-fixture"
+    )
+  }
+  testthat::local_mocked_bindings(
+    list_sources = function() registry,
+    get_source = metadata,
+    retrieve_source = function(source_id, refresh = FALSE, ...) {
+      poly_layers[[source_id]]
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "src_poly",
+      overlay_source = "tgt_poly",
+      preview_btn = 1
+    )
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+
+    session$setInputs(confirm_join_btn = 1)
+    expect_identical(wait_for_extended_task(build_task, session), "success")
+    expect_s3_class(cw_result$crosswalk, "data.frame")
+    expect_s3_class(cw_result$overlay_sf, "sf")
+
+    # The Shapes download is ready for a vector target with a joined table.
+    expect_match(
+      rendered_html(output$link_downloads_ui),
+      "id=\"dl_cw_target\""
+    )
+
+    gpkg_file <- output$dl_cw_target
+    expect_true(file.exists(gpkg_file))
+    back <- sf::st_read(gpkg_file, layer = "target", quiet = TRUE)
+    expect_s3_class(back, "sf")
+    # Exactly one feature per target feature - catches a wrong join key.
+    expect_equal(nrow(back), nrow(tgt_poly))
+    expect_true("dominant_source_id" %in% names(back))
+    expect_false(any(is.na(back$dominant_source_id)))
+    # Target's own attributes survive alongside the merged ones.
+    expect_true("TGT_ID" %in% names(back))
+  })
+})
+
+test_that("Shapes download stays disabled for a raster target", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  # The merge itself refuses a raster target (no attribute table to merge).
+  env <- load_shiny_app_env()
+  raster <- terra::rast(
+    nrows = 4, ncols = 4,
+    xmin = -80, xmax = -79, ymin = 43, ymax = 44,
+    crs = "EPSG:4326", vals = seq_len(16)
+  )
+  expect_null(env$merge_target_attributes(raster, crosswalk = tibble::tibble(x = 1)))
+
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "overlay_point"
+    )
+    cw_result$overlay_sf <- raster
+    cw_result$linked <- tibble::tibble(pm25 = 1:3)
+    session$flushReact()
+
+    html <- rendered_html(output$link_downloads_ui)
+    # No ready (id) Shapes button: a raster target has nothing to merge onto.
+    expect_false(grepl("id=\"dl_cw_target\"", html, fixed = TRUE))
+    # ...while the linked.csv Table download is ready.
+    expect_match(html, "id=\"dl_cw_csv\"", fixed = TRUE)
+  })
+})
+
+test_that("downloads render as a five-button two-column grid", {
+  env <- load_shiny_app_env()
+  items <- list(
+    list(id = "dl_cw_target", label = "Shapes", title = "target.gpkg", ready = TRUE),
+    list(id = "dl_cw_map", label = "Map", title = "map.html", ready = TRUE),
+    list(id = "dl_cw_csv", label = "Table", title = "mapping.csv", ready = TRUE),
+    list(id = "dl_cw_pairs", label = "Pairs", title = "pairs.csv", ready = FALSE),
+    list(id = "dl_cw_script", label = "Script", title = "reproduce.R", ready = FALSE)
+  )
+  html <- rendered_html(env$download_or_disabled(items))
+  # Two-column grid wrapper and one col-6 cell per button.
+  expect_match(html, "class=\"row g-1\"", fixed = TRUE)
+  expect_equal(length(gregexpr("col-6", html, fixed = TRUE)[[1]]), 5L)
+  # Five buttons in spec order: Shapes, Map, Table, Pairs, Script.
+  pos <- function(s) regexpr(s, html, fixed = TRUE)
+  labels <- c("Shapes", "Map", "Table", "Pairs", "Script")
+  positions <- vapply(labels, pos, integer(1))
+  expect_true(all(positions > 0L))
+  expect_identical(order(positions), 1:5)
+  # Real filenames carried as tooltips.
+  expect_match(html, "title=\"target.gpkg\"", fixed = TRUE)
+  expect_match(html, "title=\"map.html\"", fixed = TRUE)
+  # Ready items are real buttons, unready ones are disabled.
+  expect_match(html, "id=\"dl_cw_target\"", fixed = TRUE)
+  expect_match(html, "id=\"dl_cw_map\"", fixed = TRUE)
+  expect_match(html, "id=\"dl_cw_csv\"", fixed = TRUE)
+  expect_false(grepl("id=\"dl_cw_pairs\"", html, fixed = TRUE))
+})

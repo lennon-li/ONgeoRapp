@@ -440,18 +440,149 @@ read_uploaded_file <- function(name, datapath) {
 # each sidebar download is only ever clickable once the map/data it points to
 # exists. Readiness is per-item (item$ready) so, e.g., map.html can be ready
 # before mapping.csv is. A ready button lights up in the primary accent so
-# the user can see at a glance which downloads are available.
+# the user can see at a glance which downloads are available. Buttons sit in
+# a two-column grid (row g-1 / col-6); labels are shortened and each item's
+# real filename is carried in item$title as a tooltip.
 download_or_disabled <- function(items) {
-  tagList(lapply(items, function(item) {
-    if (isTRUE(item$ready)) {
-      downloadButton(item$id, item$label, class = "btn-primary w-100 mb-1")
+  tagList(div(class = "row g-1", lapply(items, function(item) {
+    div(class = "col-6",
+      if (isTRUE(item$ready)) {
+        downloadButton(item$id, item$label,
+          class = "btn-primary w-100 mb-1", title = item$title)
+      } else {
+        tags$button(
+          item$label, type = "button",
+          class = "btn btn-outline-secondary w-100 mb-1",
+          title = item$title, disabled = "disabled"
+        )
+      }
+    )
+  })))
+}
+
+# Reduces a pair-level build_crosswalk() table to one best row per target.
+# Direction trap: the app always calls build_crosswalk(from = overlay,
+# to = base), so the UI Target layer's id is `from_id` here, not `to_id`.
+# Winner per target: the highest `coverage`; groups whose rows all carry NA
+# coverage (nearest-style rows) fall back to the lowest `match_distance_km`;
+# any remaining tie keeps the first row, so the output is deterministic
+# across runs. Non-winning pairs stay available in pairs.csv.
+collapse_crosswalk_best_match <- function(crosswalk) {
+  n <- nrow(crosswalk)
+  if (n == 0L) {
+    return(crosswalk)
+  }
+  ids <- as.character(crosswalk$from_id)
+  coverage <- if (!is.null(crosswalk$coverage)) crosswalk$coverage else rep(NA_real_, n)
+  distance <- if (!is.null(crosswalk$match_distance_km)) {
+    crosswalk$match_distance_km
+  } else {
+    rep(NA_real_, n)
+  }
+  unique_ids <- unique(ids)
+  keep <- integer(length(unique_ids))
+  for (u in seq_along(unique_ids)) {
+    rows <- if (is.na(unique_ids[u])) which(is.na(ids)) else which(ids == unique_ids[u])
+    cov <- coverage[rows]
+    if (any(!is.na(cov))) {
+      keep[u] <- rows[which(!is.na(cov))][which.max(cov[!is.na(cov)])]
     } else {
-      tags$button(
-        item$label, type = "button", class = "btn btn-outline-secondary w-100 mb-1",
-        disabled = "disabled"
-      )
+      dist <- distance[rows]
+      if (any(!is.na(dist))) {
+        keep[u] <- rows[which(!is.na(dist))][which.min(dist[!is.na(dist)])]
+      } else {
+        keep[u] <- rows[1L]
+      }
     }
-  }))
+  }
+  # sort() restores original row order of the winning rows; deterministic.
+  crosswalk[sort(keep), , drop = FALSE]
+}
+
+# Builds the "Shapes" download content: the UI Target layer's own geometry
+# with the joined attributes merged on. Dispatches on the table schema,
+# because the join key differs by run type (all verified empirically against
+# real ONgeoR 0.4.0 output before implementation):
+#   * build_crosswalk table (carries from_id + from_id_col): collapse to the
+#     best row per from_id, then join from_id against the target column named
+#     by the table's own from_id_col (the app passes overlay as `from`).
+#   * summarise_by_target table (carries target_id): already one row per
+#     target; join target_id against the target sf's resolved id column.
+#   * raster linked table (neither): carries the target's id column under its
+#     raw name; one row per sampled point/cell, so the join below (match()
+#     from the target side) keeps each target's first matching row, and
+#     unmatched targets keep NA attributes.
+# Returns NULL when there is nothing to merge; the download guard req()s it,
+# and the button readiness mirrors the same condition.
+merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) {
+  if (is.null(target_sf) || inherits(target_sf, "SpatRaster")) {
+    # A raster target has no attribute table to merge onto.
+    return(NULL)
+  }
+  has_rows <- function(x) !is.null(x) && nrow(x) > 0L
+
+  if (has_rows(crosswalk) && "from_id" %in% names(crosswalk)) {
+    table <- collapse_crosswalk_best_match(crosswalk)
+    id_col <- if ("from_id_col" %in% names(table)) table$from_id_col[1L] else NA_character_
+    if (is.na(id_col) || !id_col %in% names(target_sf)) {
+      rlang::abort(paste(
+        "Cannot merge the crosswalk onto the target layer: the id column",
+        "recorded in the crosswalk (from_id_col) is missing from the",
+        "target layer."
+      ))
+    }
+    idx <- match(as.character(target_sf[[id_col]]), as.character(table$from_id))
+    attrs <- as.data.frame(table[idx, , drop = FALSE])
+  } else if (has_rows(crosswalk) && "target_id" %in% names(crosswalk)) {
+    id_col <- ONgeoR:::layer_id_col(target_sf)
+    idx <- match(as.character(target_sf[[id_col]]), as.character(crosswalk$target_id))
+    attrs <- as.data.frame(crosswalk[idx, , drop = FALSE])
+  } else if (has_rows(linked)) {
+    id_col <- ONgeoR:::layer_id_col(target_sf)
+    join_col <- if (id_col %in% names(linked)) {
+      id_col
+    } else if (paste0(id_col, ".y") %in% names(linked)) {
+      # st_join's collision suffixing puts the target copy under `.y`.
+      paste0(id_col, ".y")
+    } else {
+      rlang::abort(paste(
+        "Cannot merge the linked table onto the target layer: the target",
+        "id column is not present in the linked values table."
+      ))
+    }
+    key_values <- as.character(target_sf[[id_col]])
+    row_of_target <- match(as.character(linked[[join_col]]), key_values)
+    valid <- !is.na(row_of_target)
+    # The linked table re-states the target's own attribute columns; the
+    # geometry already carries those, so keep only the new columns (sampled
+    # values and provenance).
+    target_copy <- names(linked) %in% names(target_sf) |
+      sub("\\.y$", "", names(linked)) %in% names(target_sf)
+    link_attrs <- as.data.frame(linked[, !target_copy, drop = FALSE])
+    matched <- unique(row_of_target[valid])
+    unmatched <- setdiff(seq_len(nrow(target_sf)), matched)
+    target_sf <- target_sf[c(row_of_target[valid], unmatched), ]
+    attrs <- rbind(
+      link_attrs[valid, , drop = FALSE],
+      link_attrs[rep(NA_integer_, length(unmatched)), , drop = FALSE]
+    )
+    rownames(attrs) <- NULL
+  } else {
+    return(NULL)
+  }
+
+  collisions <- intersect(names(attrs), names(target_sf))
+  if (length(collisions) > 0L) {
+    rlang::abort(sprintf(
+      paste("Cannot merge the joined attributes onto the target layer:",
+        "column name collision (%s)."),
+      paste(collisions, collapse = ", ")
+    ))
+  }
+  for (nm in names(attrs)) {
+    target_sf[[nm]] <- attrs[[nm]]
+  }
+  target_sf
 }
 
 task_status_ui <- function(state, detail = NULL) {
@@ -1329,6 +1460,28 @@ server <- function(input, output, session) {
     tbl
   }, rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
 
+  # Target-layer geometry with the joined attributes merged on, as a
+  # GeoPackage (chosen over shapefile because shapefile truncates field names
+  # to 10 characters, which would mangle match_distance_km and the src_*/tgt_*
+  # attributes summarise_by_target() emits). Geometry must come from
+  # cw_result$overlay_sf: the internal names are inverted relative to the UI
+  # labels (base_sf is the UI "Source layer", overlay_sf the "Target layer").
+  output$dl_cw_target <- downloadHandler(
+    filename = function() "target.gpkg",
+    content = function(file) {
+      merged <- merge_target_attributes(
+        cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
+      )
+      req(merged)
+      # Shiny hands the handler a pre-created temp path; GPKG refuses to write
+      # into an existing file, so let delete_dsn clear it first.
+      sf::st_write(
+        merged, file, layer = "target", driver = "GPKG",
+        delete_dsn = TRUE, quiet = TRUE
+      )
+    }
+  )
+
   output$dl_cw_csv <- downloadHandler(
     filename = function() if (!is.null(cw_result$linked)) "linked.csv" else "mapping.csv",
     content = function(file) {
@@ -1377,16 +1530,29 @@ server <- function(input, output, session) {
     linked_run <- !is.null(cw_result$linked)
     link_ready <- has_rows(cw_result$crosswalk) || has_rows(cw_result$linked)
     csv_label <- if (linked_run) "linked.csv" else "mapping.csv"
+    # The Shapes download merges the joined attributes onto the target
+    # geometry, so it needs both a vector target layer and a joined table.
+    # A raster target (SpatRaster) has no attribute table to merge onto, so
+    # it stays disabled.
+    shapes_ready <- link_ready && !is.null(cw_result$overlay_sf) &&
+      !inherits(cw_result$overlay_sf, "SpatRaster")
     tagList(
+      # Two-column grid; the five buttons leave the last-row orphan on
+      # Script, which is the item most often disabled anyway.
       download_or_disabled(list(
-        list(id = "dl_cw_map", label = "map.html", ready = !is.null(cw_result$base_sf)),
-        list(id = "dl_cw_csv", label = csv_label, ready = link_ready),
-        list(id = "dl_cw_pairs", label = "pairs.csv", ready = has_rows(cw_result$pairs)),
+        list(id = "dl_cw_target", label = "Shapes", title = "target.gpkg",
+          ready = shapes_ready),
+        list(id = "dl_cw_map", label = "Map", title = "map.html",
+          ready = !is.null(cw_result$base_sf)),
+        list(id = "dl_cw_csv", label = "Table", title = csv_label,
+          ready = link_ready),
+        list(id = "dl_cw_pairs", label = "Pairs", title = "pairs.csv",
+          ready = has_rows(cw_result$pairs)),
         # reproduce.R renders a build_crosswalk script only. Raster runs
         # produce a linked values table through link(), and intersection /
         # nearest runs produce tables the script cannot rebuild, so it stays
         # disabled for all of those (a populated pairs table marks the latter).
-        list(id = "dl_cw_script", label = "reproduce.R",
+        list(id = "dl_cw_script", label = "Script", title = "reproduce.R",
           ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs) &&
             !identical(input$overlay_source, "postal_upload"))
       )),
