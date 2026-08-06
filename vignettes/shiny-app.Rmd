@@ -86,6 +86,26 @@ match is what the geometry pair already implies.
 The direction is fixed: the result is shaped like the Target layer, one row per
 target feature.
 
+## Uploading postal codes as a target layer
+
+The Target layer picker includes an "Upload postal codes" option at the end of
+the Points group. When selected, the sidebar offers a file browser accepting
+`.csv`, `.xlsx`, and `.xls` files. After uploading, the app scans every column
+for values matching the Canadian postal code format (`A1A 1A1`) after
+normalization and selects the best match (>= 80% of non-missing values). A
+dropdown lists all columns so you can override the detection.
+
+Once a column is selected, the codes are resolved to point coordinates via
+`ONgeoR::resolve_postal_points()`. The status area below the column picker
+reports how many input rows were placed and how many were unmatched. Points
+resolved through Geonames carry place-level coordinates rather than
+address-level coordinates; in rural areas these can be kilometres off, and the
+status area flags this when it applies.
+
+The resolved point layer is then used as the target for spatial linking,
+exactly as if a registered point source had been selected. No additional
+configuration is needed.
+
 ## Two result tables
 
 ```{r screenshot-data-tab, echo=FALSE, out.width="100%", fig.cap="The Data sub-tab after a successful join: one row per target feature, with source attributes prefixed src_ and target attributes prefixed tgt_."}

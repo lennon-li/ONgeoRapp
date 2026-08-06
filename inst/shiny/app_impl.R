@@ -78,6 +78,14 @@ source_choices_grouped <- function() {
   groups[lengths(groups) > 0]
 }
 
+target_choices_grouped <- function() {
+  groups <- source_choices_grouped()
+  points <- groups[["Points"]]
+  if (is.null(points)) points <- c()
+  groups[["Points"]] <- c(points, c("Upload postal codes" = "postal_upload"))
+  groups
+}
+
 # Removes `exclude_id` from whichever group of a grouped-choices list
 # contains it, then drops any group left empty - used by the mutual-exclusion
 # observers so the two source pickers can never hold the same value while
@@ -99,6 +107,7 @@ first_choice_grouped <- function(groups) {
 # Maps a source's registry geography_type to a small geometry kind token used
 # to drive the per-layer style controls and the relationship line.
 geom_kind <- function(source_id) {
+  if (identical(source_id, "postal_upload")) return("point")
   switch(ONgeoR::get_source(source_id)$geography_type,
     boundary = "polygon",
     facility = "point",
@@ -118,6 +127,9 @@ layer_geom <- function(layer) {
 
 # Colored badge descriptor for a source's registry geography_type.
 source_geom_label <- function(source_id) {
+  if (identical(source_id, "postal_upload")) {
+    return(list(text = "Point", class = "geo-point"))
+  }
   gt <- ONgeoR::get_source(source_id)$geography_type
   switch(gt,
     boundary = list(text = "Polygon", class = "geo-polygon"),
@@ -200,8 +212,16 @@ layer_dimensions <- function(layer) {
 # dimensions can be quoted here rather than described in the abstract.
 join_confirm_modal <- function(source_id, target_id, source_sf, target_sf,
                                kinds) {
-  source_name <- ONgeoR::get_source(source_id)$name
-  target_name <- ONgeoR::get_source(target_id)$name
+  source_name <- if (identical(source_id, "postal_upload")) {
+    "Uploaded postal codes"
+  } else {
+    ONgeoR::get_source(source_id)$name
+  }
+  target_name <- if (identical(target_id, "postal_upload")) {
+    "Uploaded postal codes"
+  } else {
+    ONgeoR::get_source(target_id)$name
+  }
   is_raster <- inherits(target_sf, "SpatRaster") ||
     inherits(source_sf, "SpatRaster")
   n_target <- if (inherits(target_sf, "SpatRaster")) NA_integer_ else nrow(target_sf)
@@ -379,6 +399,40 @@ read_layer_style <- function(input, prefix, geom, accent = "#2a78d6") {
       fill_opacity = g("fill_opacity") %||% 0.25
     )
   }
+}
+
+detect_postal_column <- function(df) {
+  postal_pattern <- "^[A-Z][0-9][A-Z] [0-9][A-Z][0-9]$"
+  name_pattern <- "(?i)^(postal|postal_?code|pc|post_?code|zip)$"
+  scores <- vapply(names(df), function(col) {
+    vals <- as.character(df[[col]])
+    vals <- vals[!is.na(vals) & nzchar(vals)]
+    if (length(vals) == 0L) return(0)
+    normalized <- ONgeoR::normalize_postal_code(vals)
+    sum(grepl(postal_pattern, normalized)) / length(vals)
+  }, numeric(1))
+  if (length(scores) == 0L || max(scores) < 0.8) {
+    return(list(column = NULL, score = if (length(scores) > 0L) max(scores) else 0))
+  }
+  best_score <- max(scores)
+  candidates <- names(scores)[scores == best_score]
+  if (length(candidates) == 1L) {
+    return(list(column = candidates, score = best_score))
+  }
+  name_match <- grepl(name_pattern, candidates, perl = TRUE)
+  if (any(name_match)) {
+    return(list(column = candidates[which(name_match)[1]], score = best_score))
+  }
+  list(column = candidates[1], score = best_score)
+}
+
+read_uploaded_file <- function(name, datapath) {
+  ext <- tolower(tools::file_ext(name))
+  switch(ext,
+    csv  = utils::read.csv(datapath, stringsAsFactors = FALSE, check.names = FALSE),
+    xlsx = as.data.frame(readxl::read_excel(datapath)),
+    xls  = as.data.frame(readxl::read_excel(datapath)),
+    NULL)
 }
 
 # Renders real (clickable) downloadButtons when an item's `ready` field is
@@ -665,7 +719,7 @@ ui <- bslib::page_fillable(
         )
       ),
       tags$div(class = "slot-block slot-overlay",
-        selectInput("overlay_source", "Target layer", choices = source_choices_grouped(), selected = "moh_service_locations"),
+        selectInput("overlay_source", "Target layer", choices = target_choices_grouped(), selected = "moh_service_locations"),
         tags$div(class = "slot-meta",
           uiOutput("overlay_geom_badge"),
           checkboxInput("overlay_upload_own", "Use my own file", FALSE)
@@ -677,7 +731,8 @@ ui <- bslib::page_fillable(
           selectInput("overlay_own_type", "Layer type",
             c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
           tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
-        )
+        ),
+        uiOutput("postal_upload_ui")
       ),
       uiOutput("link_relationship"),
       uiOutput("link_method_ui"),
@@ -723,7 +778,8 @@ server <- function(input, output, session) {
   # --- Async tasks (ExtendedTask; requires shiny >= 1.8.0) -----------
 
   preview_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
-                                                     generation) {
+                                                     generation,
+                                                     postal_layer = NULL) {
     promises::future_promise({
       # Defined INSIDE the future block on purpose. The app-level
       # pack_spatial() is a closure over the app source environment, which
@@ -733,7 +789,7 @@ server <- function(input, output, session) {
       # block itself as its enclosure and exports cleanly.
       pack <- function(x) if (inherits(x, "SpatRaster")) terra::wrap(x) else x
       base_sf    <- ONgeoR::retrieve_source(base_id)
-      overlay_sf <- ONgeoR::retrieve_source(overlay_id)
+      overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
            base_id = base_id, overlay_id = overlay_id,
@@ -742,7 +798,8 @@ server <- function(input, output, session) {
   })
 
   build_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
-                                                   generation) {
+                                                   generation,
+                                                   postal_layer = NULL) {
     promises::future_promise({
       # Local copies, not the app-level pack_spatial()/layer_geom() - see the
       # note in preview_task: those closures enclose the multisession plan and
@@ -754,7 +811,7 @@ server <- function(input, output, session) {
         if (all(types %in% c("POINT", "MULTIPOINT"))) "point" else "polygon"
       }
       base_sf    <- ONgeoR::retrieve_source(base_id)
-      overlay_sf <- ONgeoR::retrieve_source(overlay_id)
+      overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
       if (base_kind == "raster" || overlay_kind == "raster") {
@@ -824,7 +881,7 @@ server <- function(input, output, session) {
   # --- Layer pickers & preview ---------------------------------------
 
   observeEvent(input$base_layer, {
-    groups <- remove_choice_grouped(source_choices_grouped(), input$base_layer)
+    groups <- remove_choice_grouped(target_choices_grouped(), input$base_layer)
     selected <- if (input$overlay_source %in% unlist(groups)) {
       input$overlay_source
     } else {
@@ -904,6 +961,119 @@ server <- function(input, output, session) {
   link_state <- reactiveVal("idle")
   link_state_detail <- reactiveVal(NULL)
 
+  # --- Postal upload handling ------------------------------------------
+
+  postal_file_result <- reactive({
+    req(input$postal_file)
+    tryCatch({
+      df <- read_uploaded_file(input$postal_file$name, input$postal_file$datapath)
+      if (is.null(df)) {
+        list(df = NULL, error = "Unsupported file type. Upload a .csv, .xlsx, or .xls file.")
+      } else {
+        list(df = as.data.frame(df, stringsAsFactors = FALSE), error = NULL)
+      }
+    }, error = function(e) {
+      list(df = NULL, error = conditionMessage(e))
+    })
+  })
+
+  postal_result <- reactive({
+    fr <- postal_file_result()
+    req(fr$df)
+    col <- input$postal_column
+    req(col, nzchar(col))
+    if (!col %in% names(fr$df)) return(NULL)
+    codes <- as.character(fr$df[[col]])
+    n_input <- length(codes)
+    sf_layer <- tryCatch(
+      withCallingHandlers(
+        ONgeoR::resolve_postal_points(codes, as_sf = TRUE),
+        warning = function(w) invokeRestart("muffleWarning")
+      ),
+      error = function(e) NULL
+    )
+    n_placed <- if (!is.null(sf_layer)) nrow(sf_layer) else 0L
+    n_geonames <- if (!is.null(sf_layer) && "point_source" %in% names(sf_layer)) {
+      sum(sf_layer$point_source == "geonames", na.rm = TRUE)
+    } else {
+      0L
+    }
+    list(
+      sf = sf_layer,
+      n_input = n_input,
+      n_placed = n_placed,
+      n_unmatched = n_input - n_placed,
+      n_geonames = n_geonames
+    )
+  })
+
+  observeEvent(list(input$postal_file, input$postal_column), {
+    if (identical(input$overlay_source, "postal_upload")) {
+      preview_generation(preview_generation() + 1L)
+      link_generation(link_generation() + 1L)
+      cw_result$crosswalk <- NULL
+      cw_result$linked <- NULL
+      cw_result$pairs <- NULL
+      cw_result$base_sf <- NULL
+      cw_result$overlay_sf <- NULL
+      cw_result$previewed <- NULL
+    }
+  }, ignoreInit = TRUE)
+
+  output$postal_upload_ui <- renderUI({
+    req(identical(input$overlay_source, "postal_upload"))
+    tagList(
+      fileInput("postal_file", "Upload postal codes",
+        accept = c(".csv", ".xlsx", ".xls"),
+        buttonLabel = "Browse...",
+        placeholder = "CSV or Excel file"),
+      uiOutput("postal_column_ui"),
+      uiOutput("postal_status_ui")
+    )
+  })
+
+  output$postal_column_ui <- renderUI({
+    fr <- postal_file_result()
+    if (!is.null(fr$error)) {
+      return(tags$p(class = "text-muted", fr$error))
+    }
+    req(fr$df)
+    detection <- detect_postal_column(fr$df)
+    cols <- stats::setNames(names(fr$df), names(fr$df))
+    selected <- if (!is.null(detection$column)) detection$column else ""
+    score_text <- if (!is.null(detection$column)) {
+      sprintf("Detected: %s (%.0f%% match rate)", detection$column, detection$score * 100)
+    } else {
+      "No column with >= 80% postal code match. Select one manually."
+    }
+    tagList(
+      selectInput("postal_column", "Postal code column",
+        choices = c("Select a column..." = "", cols),
+        selected = selected),
+      tags$p(class = "text-muted", score_text)
+    )
+  })
+
+  output$postal_status_ui <- renderUI({
+    fr <- postal_file_result()
+    if (!is.null(fr$error)) return(NULL)
+    pr <- postal_result()
+    req(pr)
+    status <- tags$p(class = "text-muted",
+      sprintf("%s input rows, %s placed, %s unmatched.",
+        format(pr$n_input, big.mark = ","),
+        format(pr$n_placed, big.mark = ","),
+        format(pr$n_unmatched, big.mark = ",")))
+    if (pr$n_geonames > 0L) {
+      status <- tagList(status,
+        tags$p(class = "text-muted",
+          sprintf(
+            "%s points use Geonames place-level coordinates, not address-level. In rural areas these can be kilometres off.",
+            format(pr$n_geonames, big.mark = ","))))
+    }
+    status
+  })
+
   output$link_task_status <- renderUI({
     task_status_ui(link_state(), link_state_detail())
   })
@@ -972,9 +1142,15 @@ server <- function(input, output, session) {
 
   observeEvent(input$preview_btn, {
     req(input$base_layer, input$overlay_source)
+    postal_layer <- NULL
+    if (identical(input$overlay_source, "postal_upload")) {
+      pr <- postal_result()
+      req(pr, pr$sf)
+      postal_layer <- pr$sf
+    }
     generation <- preview_generation()
     preview_active_generation(generation)
-    preview_task$invoke(input$base_layer, input$overlay_source, generation)
+    preview_task$invoke(input$base_layer, input$overlay_source, generation, postal_layer)
   })
 
   observeEvent(preview_task$status(), {
@@ -1042,10 +1218,17 @@ server <- function(input, output, session) {
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
+    postal_layer <- NULL
+    if (identical(input$overlay_source, "postal_upload")) {
+      pr <- postal_result()
+      req(pr, pr$sf)
+      postal_layer <- pr$sf
+    }
     build_task$invoke(
       input$base_layer,
       input$overlay_source,
-      generation
+      generation,
+      postal_layer
     )
   })
 
@@ -1120,10 +1303,17 @@ server <- function(input, output, session) {
       map <- add_nearest_connectors(map, layers, connectors, conn_style, furniture = furniture)
     }
     ontario <- sf::st_bbox(furniture_layer("PHU_simple"))
+    # Ontario's full bbox runs up to Hudson Bay, so fitting it exactly leaves
+    # the populated south small on screen. Tighten the fitted extent toward
+    # its centre so the default view starts a little closer. Raise
+    # `zoom_inset` to zoom in further, set it to 0 to fit the whole province.
+    zoom_inset <- 0.12
+    inset_x <- (ontario[["xmax"]] - ontario[["xmin"]]) * zoom_inset / 2
+    inset_y <- (ontario[["ymax"]] - ontario[["ymin"]]) * zoom_inset / 2
     leaflet::fitBounds(
       map,
-      lng1 = ontario[["xmin"]], lat1 = ontario[["ymin"]],
-      lng2 = ontario[["xmax"]], lat2 = ontario[["ymax"]]
+      lng1 = ontario[["xmin"]] + inset_x, lat1 = ontario[["ymin"]] + inset_y,
+      lng2 = ontario[["xmax"]] - inset_x, lat2 = ontario[["ymax"]] - inset_y
     )
   })
 
@@ -1197,7 +1387,8 @@ server <- function(input, output, session) {
         # nearest runs produce tables the script cannot rebuild, so it stays
         # disabled for all of those (a populated pairs table marks the latter).
         list(id = "dl_cw_script", label = "reproduce.R",
-          ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs))
+          ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs) &&
+            !identical(input$overlay_source, "postal_upload"))
       )),
       # The exported map carries the furniture layers too; say so here so
       # the addition is not silent.

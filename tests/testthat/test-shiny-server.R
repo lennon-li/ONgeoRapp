@@ -706,3 +706,244 @@ test_that("map.html download bundles PHU_simple alongside the two sources", {
     )
   })
 })
+
+# --- Postal upload -------------------------------------------------
+
+test_that("auto-detection picks the right postal code column", {
+  env <- load_shiny_app_env()
+  df <- data.frame(
+    name = c("A", "B", "C"),
+    postal = c("K1A 0B1", "M5V 2T6", "N2L 3G1"),
+    other = c("foo", "bar", "baz"),
+    stringsAsFactors = FALSE
+  )
+  result <- env$detect_postal_column(df)
+  expect_identical(result$column, "postal")
+  expect_gte(result$score, 0.8)
+})
+
+test_that("auto-detection declines when no column qualifies", {
+  env <- load_shiny_app_env()
+  df <- data.frame(
+    name = c("A", "B", "C"),
+    value = c("foo", "bar", "baz"),
+    stringsAsFactors = FALSE
+  )
+  result <- env$detect_postal_column(df)
+  expect_null(result$column)
+  expect_lt(result$score, 0.8)
+})
+
+test_that("user override is honored over auto-detected column", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  postal_sf <- sf::st_as_sf(
+    tibble::tibble(
+      postal_code = c("K1A 0B1", "M5V 2T6"),
+      point_source = c("geonames", "geonames"),
+      point_method = c("place", "place"),
+      lon = c(-75.7, -79.4),
+      lat = c(45.4, 43.7)
+    ),
+    coords = c("lon", "lat"), crs = 4326
+  )
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal_points = function(x, as_sf = FALSE) {
+      postal_sf[seq_along(x), , drop = FALSE]
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(
+        wrong = c("aaa", "bbb"),
+        right_col = c("K1A 0B1", "M5V 2T6"),
+        stringsAsFactors = FALSE
+      ),
+      csv_file, row.names = FALSE
+    )
+    session$setInputs(postal_file = list(
+      name = "test.csv",
+      datapath = csv_file
+    ))
+    session$flushReact()
+    session$setInputs(postal_column = "right_col")
+    session$flushReact()
+    pr <- postal_result()
+    expect_s3_class(pr$sf, "sf")
+    expect_equal(pr$n_input, 2L)
+  })
+})
+
+test_that("successful postal upload produces an sf POINT layer used as target", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  layers <- shiny_fixture_layers()
+  postal_sf <- sf::st_as_sf(
+    tibble::tibble(
+      postal_code = c("K1A 0B1", "M5V 2T6", "N2L 3G1"),
+      point_source = c("geonames", "lia", "lia"),
+      point_method = c("place", "address", "address"),
+      lon = c(-75.7, -79.4, -80.5),
+      lat = c(45.4, 43.7, 43.5)
+    ),
+    coords = c("lon", "lat"), crs = 4326
+  )
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    retrieve_source = function(source_id, refresh = FALSE, ...) {
+      layers[[source_id]]
+    },
+    resolve_postal_points = function(x, as_sf = FALSE) {
+      postal_sf
+    },
+    build_crosswalk = function(from, to, ...) {
+      tibble::tibble(from_id = seq_len(nrow(from)), to_id = seq_len(nrow(to)))
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(postal = c("K1A 0B1", "M5V 2T6", "N2L 3G1"), stringsAsFactors = FALSE),
+      csv_file, row.names = FALSE
+    )
+    session$setInputs(postal_file = list(name = "test.csv", datapath = csv_file))
+    session$flushReact()
+    session$setInputs(postal_column = "postal")
+    session$flushReact()
+    pr <- postal_result()
+    expect_s3_class(pr$sf, "sf")
+    expect_equal(pr$n_placed, 3L)
+
+    session$setInputs(preview_btn = 1)
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+    expect_s3_class(cw_result$overlay_sf, "sf")
+    geom_types <- unique(as.character(sf::st_geometry_type(cw_result$overlay_sf)))
+    expect_true(all(geom_types %in% c("POINT", "MULTIPOINT")))
+  })
+})
+
+test_that("unmatched postal codes are reported in status text", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  postal_sf <- sf::st_as_sf(
+    tibble::tibble(
+      postal_code = "K1A 0B1",
+      point_source = "geonames",
+      point_method = "place",
+      lon = -75.7,
+      lat = 45.4
+    ),
+    coords = c("lon", "lat"), crs = 4326
+  )
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal_points = function(x, as_sf = FALSE) {
+      postal_sf
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(postal = c("K1A 0B1", "INVALID", "XXX"), stringsAsFactors = FALSE),
+      csv_file, row.names = FALSE
+    )
+    session$setInputs(postal_file = list(name = "test.csv", datapath = csv_file))
+    session$flushReact()
+    session$setInputs(postal_column = "postal")
+    session$flushReact()
+    pr <- postal_result()
+    expect_equal(pr$n_input, 3L)
+    expect_equal(pr$n_placed, 1L)
+    expect_equal(pr$n_unmatched, 2L)
+
+    status_html <- rendered_html(output$postal_status_ui)
+    expect_match(status_html, "3")
+    expect_match(status_html, "1")
+    expect_match(status_html, "2")
+    expect_match(status_html, "unmatched")
+  })
+})
+
+test_that("unreadable file yields a status message and no crash", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    bad_file <- withr::local_tempfile(fileext = ".parquet")
+    writeLines("not a real file", bad_file)
+    session$setInputs(postal_file = list(name = "data.parquet", datapath = bad_file))
+    session$flushReact()
+    fr <- postal_file_result()
+    expect_null(fr$df)
+    expect_match(fr$error, "Unsupported|parquet", ignore.case = TRUE)
+
+    column_html <- rendered_html(output$postal_column_ui)
+    expect_match(column_html, "Unsupported|parquet", ignore.case = TRUE)
+  })
+})
+
+test_that("selecting postal_upload does not error in geom_kind or geo_badge", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    badge_html <- rendered_html(output$overlay_geom_badge)
+    expect_match(badge_html, "Point")
+    expect_match(badge_html, "geo-point")
+
+    rel_html <- rendered_html(output$link_relationship)
+    expect_match(rel_html, "Point-in-boundary containment")
+  })
+})

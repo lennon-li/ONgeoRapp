@@ -1,5 +1,13 @@
 # ONgeoRapp (development version)
 
+* "Upload postal codes" is now available as a target layer option in the Shiny
+  app. Upload a CSV or Excel file containing postal codes; the app auto-detects
+  the postal code column, resolves codes to point coordinates via
+  `ONgeoR::resolve_postal_points()`, and uses the resulting sf POINT layer as
+  the target for spatial linking. Coverage reporting shows input rows, placed
+  codes, and unmatched count, and flags Geonames-sourced points as place-level
+  rather than address-level.
+
 * The "PCode2DA" postal-code tab was removed from the Shiny app, along with the
   top-level tab strip that carried it. The app is again a single-purpose spatial
   linking interface filling the page directly. The underlying postal-code
