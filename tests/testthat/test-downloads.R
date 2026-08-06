@@ -172,3 +172,34 @@ test_that("target_shapefile.zip carries sidecar files and a field-name map", {
     expect_true(all(field_names$truncated[long] != field_names$original[long]))
   })
 })
+
+test_that("zip_directory_to writes to an extensionless path", {
+  # Regression gate for the 2026-08-06 browser failure. downloadHandler hands
+  # its content function an EXTENSIONLESS tempfile, but utils::zip() appends
+  # ".zip" unless the target already ends in it -- so zipping straight onto
+  # that path wrote "<tmp>.zip", left "<tmp>" absent, and the browser download
+  # failed while the unit test passed. The test passed because testServer
+  # supplies a path matching the declared filename, which does end in ".zip";
+  # it agreed with itself. This asserts the case the app actually hits.
+  env <- load_shiny_app_env()
+  zip_directory_to <- env$zip_directory_to
+
+  staging <- withr::local_tempdir()
+  writeLines("a", file.path(staging, "a.txt"))
+  writeLines("b", file.path(staging, "b.txt"))
+
+  dest <- withr::local_tempfile()            # no extension, as Shiny passes
+  expect_false(grepl("\\.zip$", dest))
+
+  zip_directory_to(staging, dest)
+
+  expect_true(file.exists(dest))
+  expect_gt(file.size(dest), 0)
+  expect_false(file.exists(paste0(dest, ".zip")))
+  expect_setequal(utils::unzip(dest, list = TRUE)$Name, c("a.txt", "b.txt"))
+
+  # The working directory must survive the call.
+  wd_before <- getwd()
+  zip_directory_to(staging, withr::local_tempfile())
+  expect_identical(getwd(), wd_before)
+})

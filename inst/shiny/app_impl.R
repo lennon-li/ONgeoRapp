@@ -442,6 +442,31 @@ read_uploaded_file <- function(name, datapath) {
 # the user can see at a glance which downloads are available. Buttons sit in
 # a two-column grid (row g-1 / col-6); labels are shortened and each item's
 # real filename is carried in item$title as a tooltip.
+# Zip everything in `dir` and place the archive at EXACTLY `dest`.
+#
+# utils::zip() appends ".zip" whenever the target does not already end in
+# it, and downloadHandler hands its content function an EXTENSIONLESS
+# tempfile. Zipping straight onto that path therefore writes "<tmp>.zip"
+# and leaves "<tmp>" absent, so Shiny serves nothing and the browser
+# download fails -- observed 2026-08-06 in headless Chrome. The unit test
+# missed it because testServer supplies a path matching the declared
+# filename, which does end in .zip, so the test agreed with itself.
+#
+# Kept as a named helper rather than inline so the extensionless case can
+# be asserted directly in tests.
+zip_directory_to <- function(dir, dest) {
+  zip_path <- tempfile(fileext = ".zip")
+  old_wd <- setwd(dir)
+  on.exit(setwd(old_wd), add = TRUE, after = FALSE)
+  utils::zip(zip_path, files = list.files(dir))
+  setwd(old_wd)
+  if (!file.exists(zip_path)) {
+    rlang::abort("Failed to build the shapefile archive.")
+  }
+  file.copy(zip_path, dest, overwrite = TRUE)
+  invisible(dest)
+}
+
 download_or_disabled <- function(items) {
   tagList(div(class = "row g-1", lapply(items, function(item) {
     div(class = "col-6",
@@ -1760,9 +1785,7 @@ server <- function(input, output, session) {
         file.path(staging, "field_names.csv"),
         row.names = FALSE
       )
-      old_wd <- setwd(staging)
-      on.exit(setwd(old_wd), add = TRUE)
-      utils::zip(file, files = list.files(staging))
+      zip_directory_to(staging, file)
     }
   )
 
