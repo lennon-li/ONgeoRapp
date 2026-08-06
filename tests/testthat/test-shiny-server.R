@@ -157,6 +157,43 @@ test_that("preview then Link produces a crosswalk and enables downloads", {
   })
 })
 
+test_that("preview reports running then completed in its own status line", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  layers <- shiny_fixture_layers()
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    retrieve_source = function(source_id, refresh = FALSE, ...) {
+      Sys.sleep(0.05)
+      layers[[source_id]]
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+
+  shiny::testServer(server, {
+    session$setInputs(base_layer = "base_polygon", overlay_source = "overlay_point")
+    expect_match(rendered_html(output$preview_task_status), "Idle")
+
+    session$setInputs(preview_btn = 1)
+    # Running, with the animated bar and a phase file to poll.
+    running <- rendered_html(output$preview_task_status)
+    expect_match(running, "Running", fixed = TRUE)
+    expect_match(running, "progress-bar-animated", fixed = TRUE)
+    expect_true(nzchar(preview_progress_path()))
+
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+    done <- rendered_html(output$preview_task_status)
+    expect_match(done, "Completed", fixed = TRUE)
+    expect_false(grepl("progress-bar", done, fixed = TRUE))
+    # The phase file is cleaned up once the task settles.
+    expect_false(file.exists(preview_progress_path()))
+  })
+})
+
 test_that("Link discards a completion invalidated by changed inputs", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
@@ -969,6 +1006,79 @@ test_that("best-match collapse keeps one deterministic row per target", {
   expect_equal(out$to_id[out$from_id == "C"], "z1")
   # deterministic across runs.
   expect_identical(out, env$collapse_crosswalk_best_match(pairs))
+})
+
+# --- Progress reporting and explicit failures -----------------------------
+
+test_that("the status line shows an animated bar only while running", {
+  env <- load_shiny_app_env()
+  running <- rendered_html(env$task_status_ui("running", "Fetching source layer."))
+  expect_match(running, "progress-bar-animated", fixed = TRUE)
+  expect_match(running, "Fetching source layer.", fixed = TRUE)
+  expect_match(running, "Running", fixed = TRUE)
+  for (state in c("idle", "failed", "cancelled", "completed")) {
+    html <- rendered_html(env$task_status_ui(state, "x"))
+    expect_false(grepl("progress-bar", html, fixed = TRUE),
+      info = paste("state:", state))
+  }
+})
+
+test_that("the phase file round-trips and tolerates a missing file", {
+  env <- load_shiny_app_env()
+  path <- env$new_progress_path()
+  expect_null(env$read_progress_phase(path))       # not written yet
+  writeLines("Fetching target layer.", path)
+  expect_equal(env$read_progress_phase(path), "Fetching target layer.")
+  writeLines("Joining layers.", path)              # last line wins
+  expect_equal(env$read_progress_phase(path), "Joining layers.")
+  unlink(path)
+  expect_null(env$read_progress_phase(path))
+  expect_null(env$read_progress_phase(NULL))
+})
+
+test_that("retrieval failures are classified from the discarded parent", {
+  env <- load_shiny_app_env()
+  # ONgeoR's shape: a generic top-level message with the real cause as parent.
+  wrapped <- function(parent_msg) {
+    rlang::catch_cnd(rlang::abort(
+      "Could not retrieve source 'X' (layer 'Y'). Retry later;",
+      parent = rlang::catch_cnd(rlang::abort(parent_msg))
+    ))
+  }
+
+  dns <- env$describe_retrieval_failure(wrapped("Could not resolve host: ws.lioservices.lrc.gov.on.ca"))
+  expect_match(dns$message, "could not be", fixed = TRUE)
+  expect_false(dns$retry)
+  expect_match(dns$message, "Retrying now will not help", fixed = TRUE)
+
+  refused <- env$describe_retrieval_failure(wrapped("Failed to connect to host port 443"))
+  expect_false(refused$retry)
+  expect_match(refused$message, "refused the connection", fixed = TRUE)
+
+  proxy <- env$describe_retrieval_failure(wrapped("Received HTTP code 407 from proxy after CONNECT"))
+  expect_false(proxy$retry)
+  expect_match(proxy$message, "proxy", fixed = TRUE)
+
+  # Transient causes are the only ones that advise a retry.
+  server <- env$describe_retrieval_failure(wrapped("HTTP 503 Service Unavailable"))
+  expect_true(server$retry)
+  expect_match(server$message, "Retrying in a few minutes", fixed = TRUE)
+
+  timeout <- env$describe_retrieval_failure(wrapped("Timeout was reached"))
+  expect_true(timeout$retry)
+
+  # The raw chain is preserved for the technical-detail block.
+  expect_match(dns$detail, "Could not resolve host", fixed = TRUE)
+  expect_match(dns$detail, "Could not retrieve source", fixed = TRUE)
+})
+
+test_that("an unclassified failure keeps its original message", {
+  env <- load_shiny_app_env()
+  cnd <- rlang::catch_cnd(rlang::abort("Fixture retrieval failed"))
+  described <- env$describe_retrieval_failure(cnd)
+  # No invented cause, no retry advice either way.
+  expect_equal(described$message, "Fixture retrieval failed")
+  expect_true(is.na(described$retry))
 })
 
 test_that("linked aggregation reduces cells to one row per target", {

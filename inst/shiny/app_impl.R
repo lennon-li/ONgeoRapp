@@ -623,11 +623,129 @@ task_status_ui <- function(state, detail = NULL) {
     completed = "Completed"
   )
   label <- unname(labels[[state]])
-  tags$p(
-    class = paste("task-status text-muted", paste0("task-status-", state)),
-    `data-state` = state,
-    tags$strong(paste0(label, ".")),
-    if (!is.null(detail)) paste(" ", detail)
+  tagList(
+    tags$p(
+      class = paste("task-status text-muted", paste0("task-status-", state)),
+      `data-state` = state,
+      tags$strong(paste0(label, ".")),
+      if (!is.null(detail)) paste(" ", detail)
+    ),
+    # Indeterminate bar only while work is in flight. The app cannot know a
+    # true percentage - retrieval is paginated inside ONgeoR and the join is
+    # a single opaque call - so an animated bar plus the phase label in
+    # `detail` is the honest signal: something is happening, and this is what.
+    if (identical(state, "running")) {
+      tags$div(
+        class = "progress task-progress", style = "height: 6px;",
+        role = "progressbar", `aria-label` = "Task in progress",
+        tags$div(
+          class = "progress-bar progress-bar-striped progress-bar-animated",
+          style = "width: 100%;"
+        )
+      )
+    }
+  )
+}
+
+# --- Phase reporting across the future boundary ---------------------------
+# Fetch and join run inside a future in a separate R process, which cannot
+# write to a reactiveVal. The task writes its current phase to a plain file
+# whose path is passed in (a character scalar exports cleanly through future's
+# globals scan; a closure would not - see the pack() notes on the tasks). The
+# main session polls the file while the task runs.
+new_progress_path <- function() {
+  tempfile(pattern = "ongeor-progress-", fileext = ".txt")
+}
+
+read_progress_phase <- function(path) {
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) {
+    return(NULL)
+  }
+  line <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
+  line <- line[nzchar(line)]
+  if (length(line) == 0L) NULL else line[length(line)]
+}
+
+# --- Explicit retrieval failures ------------------------------------------
+# ONgeoR raises "Could not retrieve source 'X' ... Retry later" and attaches
+# the real curl/HTTP condition as `parent`. conditionMessage() returns only the
+# top level, so every network cause used to surface as the same generic text
+# advising a retry - wrong advice for a DNS failure, a refused connection or a
+# proxy block. Walk the chain, classify it, and say what actually happened.
+condition_chain_text <- function(cnd) {
+  parts <- character()
+  seen <- 0L
+  while (!is.null(cnd) && seen < 10L) {
+    parts <- c(parts, tryCatch(conditionMessage(cnd), error = function(e) ""))
+    cnd <- cnd$parent
+    seen <- seen + 1L
+  }
+  paste(parts[nzchar(parts)], collapse = " | ")
+}
+
+describe_retrieval_failure <- function(cnd) {
+  raw <- condition_chain_text(cnd)
+  low <- tolower(raw)
+  hit <- function(pattern) grepl(pattern, low, perl = TRUE)
+
+  # Proxy is checked before the generic connection failures: a blocked proxy
+  # often also reports a connect failure, and the proxy cause is the useful one.
+  if (hit("proxy|http code 407|407 proxy")) {
+    msg <- paste("A network proxy blocked the request to the data service.",
+      "This is common on corporate networks.")
+    retry <- FALSE
+  } else if (hit("could not resolve|resolving timed out|name or service not known|nodename nor servname")) {
+    msg <- paste("Cannot reach the data service: the address could not be",
+      "resolved. Check your network or VPN connection.")
+    retry <- FALSE
+  } else if (hit("connection refused|failed to connect|could ?n[o']?t connect|connection reset")) {
+    msg <- paste("The data service refused the connection. It may be offline,",
+      "or a firewall may be blocking it.")
+    retry <- FALSE
+  } else if (hit("timed out|timeout was reached|operation timed out")) {
+    msg <- "The data service did not respond in time."
+    retry <- TRUE
+  } else if (hit("ssl|certificate|tls")) {
+    msg <- paste("The secure connection to the data service could not be",
+      "established (TLS/certificate problem).")
+    retry <- FALSE
+  } else if (hit("http 5[0-9]{2}|status 5[0-9]{2}")) {
+    msg <- "The data service returned a server error."
+    retry <- TRUE
+  } else if (hit("http 40[34]|status 40[34]|not found")) {
+    msg <- paste("The requested layer is not available at the recorded",
+      "address; it may have been moved or withdrawn.")
+    retry <- FALSE
+  } else {
+    # Unclassified: keep the original message rather than inventing one.
+    msg <- tryCatch(conditionMessage(cnd), error = function(e) raw)
+    retry <- NA
+  }
+
+  advice <- if (isTRUE(retry)) {
+    " Retrying in a few minutes may succeed."
+  } else if (isFALSE(retry)) {
+    " Retrying now will not help until the cause above is resolved."
+  } else {
+    ""
+  }
+  list(message = paste0(msg, advice), detail = raw, retry = retry)
+}
+
+# Notification carrying the plain-language cause, with the raw condition chain
+# tucked into a <details> block so it is available for debugging without
+# putting curl text in front of a non-technical user.
+retrieval_failure_notification <- function(described) {
+  tagList(
+    tags$strong(described$message),
+    if (nzchar(described$detail)) {
+      tags$details(
+        class = "mt-2",
+        tags$summary("Technical detail"),
+        tags$pre(class = "small mb-0", style = "white-space: pre-wrap;",
+          described$detail)
+      )
+    }
   )
 }
 
@@ -897,6 +1015,7 @@ ui <- bslib::page_fillable(
       uiOutput("link_relationship"),
       uiOutput("link_method_ui"),
       actionButton("preview_btn", "Preview on map", class = "btn-preview w-100 mb-1"),
+      uiOutput("preview_task_status"),
       uiOutput("build_btn_ui"),
       uiOutput("link_task_status"),
       tags$hr(),
@@ -939,7 +1058,8 @@ server <- function(input, output, session) {
 
   preview_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                      generation,
-                                                     postal_layer = NULL) {
+                                                     postal_layer = NULL,
+                                                     progress_path = NULL) {
     promises::future_promise({
       # Defined INSIDE the future block on purpose. The app-level
       # pack_spatial() is a closure over the app source environment, which
@@ -948,8 +1068,17 @@ server <- function(input, output, session) {
       # ("Detected a non-exportable reference"). A local copy has the future
       # block itself as its enclosure and exports cleanly.
       pack <- function(x) if (inherits(x, "SpatRaster")) terra::wrap(x) else x
+      # Same reasoning: a local writer over a plain path, not a closure.
+      note <- function(phase) {
+        if (!is.null(progress_path)) {
+          try(writeLines(phase, progress_path), silent = TRUE)
+        }
+      }
+      note("Fetching source layer.")
       base_sf    <- ONgeoR::retrieve_source(base_id)
+      note("Fetching target layer.")
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
+      note("Preparing layers for the map.")
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
            base_id = base_id, overlay_id = overlay_id,
@@ -959,19 +1088,28 @@ server <- function(input, output, session) {
 
   build_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                    generation,
-                                                   postal_layer = NULL) {
+                                                   postal_layer = NULL,
+                                                   progress_path = NULL) {
     promises::future_promise({
       # Local copies, not the app-level pack_spatial()/layer_geom() - see the
       # note in preview_task: those closures enclose the multisession plan and
       # are rejected by future's non-exportable-globals check.
       pack <- function(x) if (inherits(x, "SpatRaster")) terra::wrap(x) else x
+      note <- function(phase) {
+        if (!is.null(progress_path)) {
+          try(writeLines(phase, progress_path), silent = TRUE)
+        }
+      }
       kind_of <- function(layer) {
         if (inherits(layer, "SpatRaster")) return("raster")
         types <- unique(as.character(sf::st_geometry_type(layer)))
         if (all(types %in% c("POINT", "MULTIPOINT"))) "point" else "polygon"
       }
+      note("Fetching source layer.")
       base_sf    <- ONgeoR::retrieve_source(base_id)
+      note("Fetching target layer.")
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
+      note("Joining layers.")
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
       if (base_kind == "raster" || overlay_kind == "raster") {
@@ -1120,6 +1258,14 @@ server <- function(input, output, session) {
   link_active_inputs <- reactiveVal(NULL)
   link_state <- reactiveVal("idle")
   link_state_detail <- reactiveVal(NULL)
+  # Preview has its own status line: it is the longer wait of the two and
+  # previously reported nothing but a button label.
+  preview_state <- reactiveVal("idle")
+  preview_state_detail <- reactiveVal(NULL)
+  # Paths the running tasks write their current phase to (see
+  # new_progress_path / read_progress_phase).
+  preview_progress_path <- reactiveVal(NULL)
+  link_progress_path <- reactiveVal(NULL)
 
   # --- Postal upload handling ------------------------------------------
 
@@ -1238,6 +1384,35 @@ server <- function(input, output, session) {
     task_status_ui(link_state(), link_state_detail())
   })
 
+  output$preview_task_status <- renderUI({
+    task_status_ui(preview_state(), preview_state_detail())
+  })
+
+  # Poll the running tasks' phase files and push the phase into the status
+  # line. A future cannot write to a reactiveVal, so the file is the channel;
+  # this observer is the only thing that reads it. It reschedules itself only
+  # while something is running, so an idle app does no polling.
+  observe({
+    running <- identical(preview_state(), "running") ||
+      identical(link_state(), "running")
+    if (!running) {
+      return()
+    }
+    invalidateLater(500)
+    if (identical(preview_state(), "running")) {
+      phase <- read_progress_phase(isolate(preview_progress_path()))
+      if (!is.null(phase) && !identical(phase, isolate(preview_state_detail()))) {
+        preview_state_detail(phase)
+      }
+    }
+    if (identical(link_state(), "running")) {
+      phase <- read_progress_phase(isolate(link_progress_path()))
+      if (!is.null(phase) && !identical(phase, isolate(link_state_detail()))) {
+        link_state_detail(phase)
+      }
+    }
+  })
+
   # Last pair this observer actually acted on, used to tell a real user change
   # from an echo. The mutual-exclusion observers above call updateSelectInput()
   # on the opposite picker whenever either changes, and updating `choices` makes
@@ -1263,6 +1438,13 @@ server <- function(input, output, session) {
     } else if (!identical(link_state(), "cancelled")) {
       link_state("idle")
       link_state_detail(NULL)
+    }
+    if (identical(preview_state(), "running")) {
+      preview_state("cancelled")
+      preview_state_detail("Inputs changed; the previous preview was discarded.")
+    } else if (!identical(preview_state(), "cancelled")) {
+      preview_state("idle")
+      preview_state_detail(NULL)
     }
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
@@ -1310,18 +1492,30 @@ server <- function(input, output, session) {
     }
     generation <- preview_generation()
     preview_active_generation(generation)
-    preview_task$invoke(input$base_layer, input$overlay_source, generation, postal_layer)
+    path <- new_progress_path()
+    preview_progress_path(path)
+    preview_state("running")
+    preview_state_detail("Starting.")
+    preview_task$invoke(input$base_layer, input$overlay_source, generation,
+      postal_layer, path)
   })
 
   observeEvent(preview_task$status(), {
     s <- preview_task$status()
     if (!s %in% c("success", "error")) return()
     if (!identical(preview_active_generation(), preview_generation())) return()
+    unlink(isolate(preview_progress_path()) %||% character())
     result <- tryCatch(preview_task$result(), error = function(e) e)
     if (inherits(result, "error")) {
-      showNotification(conditionMessage(result), type = "error", duration = NULL)
+      described <- describe_retrieval_failure(result)
+      preview_state("failed")
+      preview_state_detail(described$message)
+      showNotification(retrieval_failure_notification(described),
+        type = "error", duration = NULL)
       return()
     }
+    preview_state("completed")
+    preview_state_detail("Both layers are on the map.")
     if (!identical(result$generation, preview_generation())) return()
     cw_result$base_sf <- unpack_spatial(result$base_sf)
     cw_result$overlay_sf <- unpack_spatial(result$overlay_sf)
@@ -1374,7 +1568,8 @@ server <- function(input, output, session) {
     link_active_generation(generation)
     link_active_inputs(requested_inputs)
     link_state("running")
-    link_state_detail("Linking selected layers.")
+    link_state_detail("Starting.")
+    link_progress_path(new_progress_path())
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
@@ -1388,7 +1583,8 @@ server <- function(input, output, session) {
       input$base_layer,
       input$overlay_source,
       generation,
-      postal_layer
+      postal_layer,
+      isolate(link_progress_path())
     )
   })
 
@@ -1408,11 +1604,14 @@ server <- function(input, output, session) {
       return()
     }
     if (!identical(link_active_generation(), link_generation())) return()
+    unlink(isolate(link_progress_path()) %||% character())
     result <- tryCatch(build_task$result(), error = function(e) e)
     if (inherits(result, "error")) {
+      described <- describe_retrieval_failure(result)
       link_state("failed")
-      link_state_detail(conditionMessage(result))
-      showNotification(conditionMessage(result), type = "error", duration = NULL)
+      link_state_detail(described$message)
+      showNotification(retrieval_failure_notification(described),
+        type = "error", duration = NULL)
       return()
     }
     if (!identical(result$generation, link_generation())) return()
