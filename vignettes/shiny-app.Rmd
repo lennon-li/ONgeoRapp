@@ -127,14 +127,25 @@ other.
 
 ## Download buttons
 
-The download buttons become available as the underlying result appears.
+The download buttons sit in a two-column grid and become available as the
+underlying result appears. Each button's label is short; hover it to see the
+filename it produces.
 
 | Button | Output |
 |---|---|
-| **Download map** | `map.html` -- the Leaflet map as a standalone HTML file |
-| **Download results** | `mapping.csv` -- one row per target feature (or `linked.csv` for raster linking) |
-| **Download pairs** | `pairs.csv` -- one row per matched pair |
-| **Download script** | `reproduce.R` -- an R script that reproduces the result from scratch |
+| **Shapes** | `target.gpkg` -- the target layer's geometry with the joined attributes merged on |
+| **Map** | `map.html` -- the Leaflet map as a standalone HTML file |
+| **Table** | `mapping.csv` -- one row per target feature (or `linked.csv` for raster linking) |
+| **Pairs** | `pairs.csv` -- one row per matched pair |
+| **Script** | `reproduce.R` -- an R script that reproduces the result from scratch |
+
+`target.gpkg` is a GeoPackage, so it opens directly in QGIS or ArcGIS with the
+joined attributes already attached -- no manual re-join against a separately
+downloaded boundary file. It carries one row per target feature; where a target
+matched several sources, the best match is kept (highest coverage, then
+shortest distance) and the full set stays in `pairs.csv`. For raster linking,
+the sampled cell values are averaged per target feature, with `linked_cells`
+recording how many cells contributed.
 
 The `map.html` file embeds the widget's JavaScript and data, so it opens
 without R installed; note the basemap tiles are still fetched from the tile

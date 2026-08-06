@@ -11,8 +11,10 @@ Pick a **Source layer** and a **Target layer** from the Ontario Land
 Information Ontario (LIO) registry. The geometry pair alone determines the
 linking operation — polygon intersection, nearest point matching, containment,
 or raster sampling — so there is no match rule for you to choose. The app draws
-both layers on a map, shows the linked table, and exports `mapping.csv`,
-`pairs.csv`, `map.html`, and a `reproduce.R` script.
+both layers on a map, shows the linked table, and exports `target.gpkg` — the
+target layer's geometry with the joined attributes merged on, ready to open in
+QGIS or ArcGIS — alongside `mapping.csv`, `pairs.csv`, `map.html`, and a
+`reproduce.R` script.
 
 Live app: <https://biostats-ongeor.share.connect.posit.cloud/>
 

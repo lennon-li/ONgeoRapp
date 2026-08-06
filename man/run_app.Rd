@@ -17,7 +17,8 @@ returns \code{NULL}.
 Launches a thin Shiny UI over the package: pick a source and a target
 layer, and the geometry pair alone decides the link (intersection,
 nearest, containment, or raster sampling). View the map and table and
-download \code{mapping.csv}, \code{pairs.csv}, \code{map.html}, and \code{reproduce.R}.
+download \code{target.gpkg} (the target geometry with the joined attributes
+merged on), \code{mapping.csv}, \code{pairs.csv}, \code{map.html}, and \code{reproduce.R}.
 }
 \examples{
 if (interactive()) {
