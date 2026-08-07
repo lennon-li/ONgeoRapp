@@ -200,7 +200,9 @@ test_that("preview reports running then completed in its own status line", {
     # Running, with the animated bar and a phase file to poll.
     running <- rendered_html(output$preview_task_status)
     expect_match(running, "Running", fixed = TRUE)
-    expect_match(running, "progress-bar-animated", fixed = TRUE)
+    # The bar moved into the progress dialog; the sidebar is a plain line now.
+    expect_match(running, 'data-state="running"', fixed = TRUE)
+    expect_false(grepl("progress-bar-animated", running, fixed = TRUE))
     expect_true(nzchar(preview_progress_path()))
 
     expect_identical(wait_for_extended_task(preview_task, session), "success")
@@ -994,16 +996,18 @@ test_that("best-match collapse keeps one deterministic row per target", {
 
 # --- Progress reporting and explicit failures -----------------------------
 
-test_that("the status line shows an animated bar only while running", {
+test_that("the status line reports state plainly, with no bar", {
+  # The animated bar, green banner, phase log and Cancel all moved into the
+  # progress dialog: Lennon asked for them in a pop up rather than the control
+  # panel, where they were "hard to see".
   env <- load_shiny_app_env()
   running <- rendered_html(env$task_status_ui("running", "Fetching source layer."))
-  expect_match(running, "progress-bar-animated", fixed = TRUE)
   expect_match(running, "Fetching source layer.", fixed = TRUE)
   expect_match(running, "Running", fixed = TRUE)
+  expect_false(grepl("progress-bar-animated", running, fixed = TRUE))
   for (state in c("idle", "failed", "cancelled", "completed")) {
     html <- rendered_html(env$task_status_ui(state, "x"))
-    expect_false(grepl("progress-bar", html, fixed = TRUE),
-      info = paste("state:", state))
+    expect_false(grepl("progress-bar-animated", html, fixed = TRUE))
   }
 })
 
@@ -1025,39 +1029,21 @@ test_that("the phase log accumulates in order and tolerates a missing file", {
   expect_null(env$read_progress_phase(NULL))
 })
 
-test_that("the running status shows a banner, a bar, cumulative phases, and cancel", {
-  # Replaces an earlier test of task_progress_modal(). The modal was removed:
-  # Shiny tore it out of the DOM within ~2s of showModal(), measured in
-  # headless Chrome as present in only 3 of 60 samples, with no removeModal()
-  # from this app. The same information now renders inline in the sidebar,
-  # which updates reliably for the whole run.
+test_that("the progress dialog carries a banner, a bar, a phase list, cancel and OK", {
+  # The dialog shell is static: its phase list is filled in from the browser by
+  # the "ongeor-progress" custom message, because re-rendering anything inside
+  # a live Shiny modal tore the modal out of the DOM (measured 2026-08-06).
   env <- load_shiny_app_env()
-  # `detail` deliberately does NOT repeat a phase string: it renders above the
-  # log, so a shared string would make the ordering assertion below measure the
-  # detail line instead of the log.
-  html <- rendered_html(env$task_status_ui(
-    "running",
-    "Working.",
-    c("Retrieving source data...", "Joining layers...")
-  ))
+  html <- rendered_html(env$task_progress_modal("Join"))
   expect_match(html, "alert-success", fixed = TRUE)
+  expect_match(html, "Join running...", fixed = TRUE)
   expect_match(html, "progress-bar-animated", fixed = TRUE)
-  expect_match(html, "id=\"cancel_task_btn\"", fixed = TRUE)
-  # Phases accumulate in order rather than replacing one another.
-  expect_true(
-    regexpr("Retrieving source data...", html, fixed = TRUE) <
-      regexpr("Joining layers...", html, fixed = TRUE)
-  )
-  expect_match(html, "task-phase-log", fixed = TRUE)
-})
-
-test_that("the idle status shows no banner, bar, phase log, or cancel", {
-  env <- load_shiny_app_env()
-  html <- rendered_html(env$task_status_ui("idle"))
-  expect_false(grepl("alert-success", html, fixed = TRUE))
-  expect_false(grepl("progress-bar-animated", html, fixed = TRUE))
-  expect_false(grepl("task-phase-log", html, fixed = TRUE))
-  expect_false(grepl("cancel_task_btn", html, fixed = TRUE))
+  expect_match(html, 'id="task_phase_list"', fixed = TRUE)
+  expect_match(html, 'id="cancel_task_btn"', fixed = TRUE)
+  # OK ships hidden and is revealed by the browser when the task finishes, so
+  # the dialog waits for the user instead of vanishing.
+  expect_match(html, 'id="progress_ok_btn"', fixed = TRUE)
+  expect_match(html, "d-none", fixed = TRUE)
 })
 
 test_that("retrieval failures are classified from the discarded parent", {

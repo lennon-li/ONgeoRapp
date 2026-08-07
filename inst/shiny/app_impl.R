@@ -647,56 +647,73 @@ task_status_ui <- function(state, detail = NULL, phases = character()) {
     completed = "Completed"
   )
   label <- unname(labels[[state]])
-  tagList(
-    # A green banner while work is in flight. Lennon: "hoping to see running
-    # with green banner or progress bar, then log msg on retrieving source
-    # data.... make the process transparent."
-    #
-    # This lives inline in the sidebar rather than in a modal. A modal was
-    # tried twice and abandoned: Shiny tore it out of the DOM within ~2s of
-    # being shown, with no removeModal() from this app -- measured in headless
-    # Chrome, present in only 3 of 60 samples, while this sidebar output
-    # updates reliably for the full run. See the note above the progress
-    # poller.
-    if (identical(state, "running")) {
-      tags$div(class = "alert alert-success py-2 px-3 mb-2", role = "status",
-        tags$strong("Running"))
-    },
-    tags$p(
-      class = paste("task-status text-muted", paste0("task-status-", state)),
-      `data-state` = state,
-      tags$strong(paste0(label, ".")),
-      if (!is.null(detail)) paste(" ", detail)
-    ),
-    # Indeterminate bar only while work is in flight. The app cannot know a
-    # true percentage - retrieval is paginated inside ONgeoR and the join is
-    # a single opaque call - so an animated bar plus the phase label in
-    # `detail` is the honest signal: something is happening, and this is what.
-    if (identical(state, "running")) {
-      tags$div(
-        class = "progress task-progress", style = "height: 6px;",
-        role = "progressbar", `aria-label` = "Task in progress",
-        tags$div(
-          class = "progress-bar progress-bar-striped progress-bar-animated",
-          style = "width: 100%;"
-        )
-      )
-    },
-    # The accumulating phase log: each step stays on screen as the next
-    # arrives, so a 30-second wait shows what it is doing rather than one
-    # unchanging sentence.
-    if (identical(state, "running") && length(phases) > 0) {
-      tags$ol(class = "task-phase-log small text-muted mt-2 mb-0",
-        lapply(phases, tags$li))
-    },
-    # Cancel lived in the modal. Removing the modal removed the only way to
-    # reach observeEvent(input$cancel_task_btn), so it moves here.
-    if (identical(state, "running")) {
-      actionButton("cancel_task_btn", "Cancel",
-        class = "btn btn-outline-secondary btn-sm w-100 mt-2")
-    }
+  # Deliberately plain. The banner, progress bar, phase log and Cancel all
+  # live in the progress dialog now -- Lennon: "it should not be in control
+  # panel, hard to see, should be in a pop up box". `phases` is accepted and
+  # ignored so existing callers and tests keep working.
+  tags$p(
+    class = paste("task-status text-muted", paste0("task-status-", state)),
+    `data-state` = state,
+    tags$strong(paste0(label, ".")),
+    if (!is.null(detail)) paste(" ", detail)
   )
 }
+
+# The progress dialog SHELL. Shown exactly once per run and never re-rendered
+# by Shiny.
+#
+# Everything inside is updated from the browser by the "ongeor-progress"
+# custom message below. That indirection is not decoration: re-issuing
+# showModal() on each phase tick rebuilt the dialog twice a second (present in
+# 4 of 60 samples in headless Chrome), and putting a uiOutput() inside a live
+# modal tore the modal out of the DOM after its first render, with no
+# removeModal() from this app and no server error. Updating innerHTML from JS
+# leaves the dialog element untouched, so it survives.
+task_progress_modal <- function(operation) {
+  modalDialog(
+    title = NULL,
+    tags$div(id = "task_banner", class = "alert alert-success mb-3",
+      role = "status", tags$strong(paste0(operation, " running..."))),
+    tags$div(id = "task_bar_wrap", class = "progress mb-3",
+      style = "height: 6px;", role = "progressbar",
+      tags$div(class = "progress-bar progress-bar-striped progress-bar-animated",
+        style = "width: 100%;")),
+    tags$ol(id = "task_phase_list", class = "task-phase-log mb-0"),
+    footer = tagList(
+      actionButton("cancel_task_btn", "Cancel", class = "btn-outline-secondary"),
+      actionButton("progress_ok_btn", "OK", class = "btn-primary d-none")
+    ),
+    easyClose = FALSE
+  )
+}
+
+# Browser-side updater. Rewrites the phase list, and on finish swaps the
+# banner, stops the bar, and reveals OK so the user dismisses the dialog
+# themselves rather than having it vanish.
+task_progress_js <- tags$script(HTML("
+Shiny.addCustomMessageHandler('ongeor-progress', function(m) {
+  var list = document.getElementById('task_phase_list');
+  if (!list) return;
+  var html = '';
+  for (var i = 0; i < m.phases.length; i++) {
+    html += '<li>' + m.phases[i] + '</li>';
+  }
+  list.innerHTML = html;
+  if (m.done) {
+    var banner = document.getElementById('task_banner');
+    if (banner) {
+      banner.className = 'alert mb-3 ' + (m.ok ? 'alert-success' : 'alert-danger');
+      banner.innerHTML = '<strong>' + m.title + '</strong>';
+    }
+    var bar = document.getElementById('task_bar_wrap');
+    if (bar) bar.style.display = 'none';
+    var cancel = document.getElementById('cancel_task_btn');
+    if (cancel) cancel.classList.add('d-none');
+    var okb = document.getElementById('progress_ok_btn');
+    if (okb) okb.classList.remove('d-none');
+  }
+});
+"))
 
 # --- Phase reporting across the future boundary ---------------------------
 # Fetch and join run inside a future in a separate R process, which cannot
@@ -1023,7 +1040,7 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
 ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
-  tags$head(tags$link(rel = "stylesheet", href = "theme.css")),
+  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js),
   # The logo lives at the top of the sidebar, not in a page header. The app is
   # a single-purpose linking interface, so the layout can fill the page
   # directly and a header bar would only cost the map vertical space.
@@ -1469,6 +1486,7 @@ server <- function(input, output, session) {
       if (!is.null(phase) && !identical(phase, isolate(preview_state_detail()))) {
         preview_state_detail(phase)
       }
+      push_progress(phases %||% character(), done = FALSE)
     }
     if (identical(link_state(), "running")) {
       phases <- read_progress_phases(isolate(link_progress_path()))
@@ -1477,7 +1495,70 @@ server <- function(input, output, session) {
       if (!is.null(phase) && !identical(phase, isolate(link_state_detail()))) {
         link_state_detail(phase)
       }
+      push_progress(phases %||% character(), done = FALSE)
     }
+  })
+
+  # --- progress dialog -----------------------------------------------------
+  #
+  # Shown once when work starts, updated from the browser, and dismissed by
+  # the user with OK. It is never re-rendered by Shiny while open; see the
+  # note on task_progress_modal() for the two approaches that failed.
+  push_progress <- function(phases, done, ok = TRUE, title = NULL) {
+    session$sendCustomMessage("ongeor-progress", list(
+      phases = as.list(as.character(phases)),
+      done = isTRUE(done),
+      ok = isTRUE(ok),
+      title = title %||% ""
+    ))
+  }
+
+  progress_dialog_open <- reactiveVal(FALSE)
+
+  open_progress_dialog <- function(op) {
+    showModal(task_progress_modal(op))
+    progress_dialog_open(TRUE)
+  }
+
+  # Preview opens its own dialog. Join reuses the confirmation dialog already
+  # on screen -- Lennon: "combine with the existing pop up" -- so the confirm
+  # box becomes the progress box in place rather than closing and reopening.
+  observeEvent(preview_state(), {
+    if (identical(preview_state(), "running") && !isTRUE(isolate(progress_dialog_open()))) {
+      open_progress_dialog("Preview")
+    }
+  })
+
+  # Finish: swap the banner, stop the bar, reveal OK. The dialog stays until
+  # the user dismisses it.
+  finish_progress <- function(state, phases, what) {
+    if (!isTRUE(isolate(progress_dialog_open()))) return()
+    title <- switch(state,
+      completed = paste(what, "complete."),
+      failed    = paste(what, "failed."),
+      cancelled = paste(what, "cancelled."),
+      paste(what, state))
+    push_progress(phases, done = TRUE,
+      ok = identical(state, "completed"), title = title)
+  }
+
+  observeEvent(preview_state(), {
+    st <- preview_state()
+    if (st %in% c("completed", "failed", "cancelled")) {
+      finish_progress(st, isolate(preview_progress_log()), "Preview")
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(link_state(), {
+    st <- link_state()
+    if (st %in% c("completed", "failed", "cancelled")) {
+      finish_progress(st, isolate(link_progress_log()), "Join")
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$progress_ok_btn, {
+    progress_dialog_open(FALSE)
+    removeModal()
   })
 
   observeEvent(input$cancel_task_btn, {
@@ -1630,7 +1711,9 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$confirm_join_btn, {
-    removeModal()
+    # Do NOT removeModal() here: the confirmation dialog is replaced in place
+    # by the progress dialog, so the user never sees a flash of bare page.
+    open_progress_dialog("Join")
     req(input$base_layer, input$overlay_source)
     requested_inputs <- list(
       base_layer = input$base_layer,
