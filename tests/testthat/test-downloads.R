@@ -59,7 +59,7 @@ test_that("merged download object carries target, source, and join attributes", 
   expect_true(is.na(merged$to_name[merged$point_id == 10]))
 })
 
-test_that("target_shapefile.zip carries sidecar files and a field-name map", {
+test_that("target_shapes.zip carries GeoPackage, shapefile sidecars, and a field-name map", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
   skip_if(
@@ -133,13 +133,13 @@ test_that("target_shapefile.zip carries sidecar files and a field-name map", {
     session$setInputs(confirm_join_btn = 1)
     expect_identical(wait_for_extended_task(build_task, session), "success")
 
-    # The SHP button lights up whenever the Shapes button does.
+    # Shape combines the GeoPackage and shapefile formats in one archive.
     expect_match(
       rendered_html(output$link_downloads_ui),
-      "id=\"dl_cw_shp\""
+      "id=\"dl_cw_target\""
     )
 
-    zip_file <- output$dl_cw_shp
+    zip_file <- output$dl_cw_target
     expect_true(file.exists(zip_file))
 
     exdir <- tempfile("shp_unzip")
@@ -148,7 +148,7 @@ test_that("target_shapefile.zip carries sidecar files and a field-name map", {
     utils::unzip(zip_file, exdir = exdir)
     entries <- list.files(exdir)
     expect_true(all(
-      c("target.shp", "target.shx", "target.dbf", "target.prj",
+      c("target.gpkg", "target.shp", "target.shx", "target.dbf", "target.prj",
         "field_names.csv") %in% entries
     ))
 
@@ -170,6 +170,42 @@ test_that("target_shapefile.zip carries sidecar files and a field-name map", {
     expect_true("match_distance_km" %in% field_names$original)
     long <- nchar(field_names$original) > 10L
     expect_true(all(field_names$truncated[long] != field_names$original[long]))
+  })
+})
+
+test_that("target_tables.zip carries results and pairs tables", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  layers <- shiny_fixture_layers()
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    retrieve_source = function(source_id, refresh = FALSE, ...) layers[[source_id]],
+    build_crosswalk = function(from, to, ...) {
+      tibble::tibble(from_id = 1:2, to_id = c("P1", "P2"))
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "overlay_point",
+      preview_btn = 1
+    )
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+    session$setInputs(confirm_join_btn = 1)
+    expect_identical(wait_for_extended_task(build_task, session), "success")
+
+    zip_file <- output$dl_cw_csv
+    expect_true(file.exists(zip_file))
+    expect_setequal(
+      utils::unzip(zip_file, list = TRUE)$Name,
+      c("mapping.csv", "pairs.csv")
+    )
   })
 })
 

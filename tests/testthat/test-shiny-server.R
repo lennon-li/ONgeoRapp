@@ -167,12 +167,10 @@ test_that("preview then Link produces a crosswalk and enables downloads", {
     expect_match(downloads, "id=\"dl_cw_csv\"")
     expect_match(downloads, "id=\"dl_cw_script\"")
 
-    expected_file <- withr::local_tempfile(fileext = ".csv")
-    utils::write.csv(cw_result$crosswalk, expected_file, row.names = FALSE)
     actual_file <- output$dl_cw_csv
-    expect_equal(
-      readBin(actual_file, what = "raw", n = file.info(actual_file)$size),
-      readBin(expected_file, what = "raw", n = file.info(expected_file)$size)
+    expect_setequal(
+      utils::unzip(actual_file, list = TRUE)$Name,
+      c("mapping.csv", "pairs.csv")
     )
   })
 })
@@ -1009,17 +1007,57 @@ test_that("the status line shows an animated bar only while running", {
   }
 })
 
-test_that("the phase file round-trips and tolerates a missing file", {
+test_that("the phase log accumulates in order and tolerates a missing file", {
   env <- load_shiny_app_env()
   path <- env$new_progress_path()
-  expect_null(env$read_progress_phase(path))       # not written yet
-  writeLines("Fetching target layer.", path)
-  expect_equal(env$read_progress_phase(path), "Fetching target layer.")
-  writeLines("Joining layers.", path)              # last line wins
-  expect_equal(env$read_progress_phase(path), "Joining layers.")
+  expect_null(env$read_progress_phases(path))       # not written yet
+  cat("Retrieving source data...\n", file = path, append = TRUE)
+  cat("Retrieving target data...\n", file = path, append = TRUE)
+  cat("Joining layers...\n", file = path, append = TRUE)
+  expect_equal(
+    env$read_progress_phases(path),
+    c("Retrieving source data...", "Retrieving target data...", "Joining layers...")
+  )
+  expect_equal(env$read_progress_phase(path), "Joining layers...")
   unlink(path)
+  expect_null(env$read_progress_phases(path))
   expect_null(env$read_progress_phase(path))
   expect_null(env$read_progress_phase(NULL))
+})
+
+test_that("the running status shows a banner, a bar, cumulative phases, and cancel", {
+  # Replaces an earlier test of task_progress_modal(). The modal was removed:
+  # Shiny tore it out of the DOM within ~2s of showModal(), measured in
+  # headless Chrome as present in only 3 of 60 samples, with no removeModal()
+  # from this app. The same information now renders inline in the sidebar,
+  # which updates reliably for the whole run.
+  env <- load_shiny_app_env()
+  # `detail` deliberately does NOT repeat a phase string: it renders above the
+  # log, so a shared string would make the ordering assertion below measure the
+  # detail line instead of the log.
+  html <- rendered_html(env$task_status_ui(
+    "running",
+    "Working.",
+    c("Retrieving source data...", "Joining layers...")
+  ))
+  expect_match(html, "alert-success", fixed = TRUE)
+  expect_match(html, "progress-bar-animated", fixed = TRUE)
+  expect_match(html, "id=\"cancel_task_btn\"", fixed = TRUE)
+  # Phases accumulate in order rather than replacing one another.
+  expect_true(
+    regexpr("Retrieving source data...", html, fixed = TRUE) <
+      regexpr("Joining layers...", html, fixed = TRUE)
+  )
+  expect_match(html, "task-phase-log", fixed = TRUE)
+})
+
+test_that("the idle status shows no banner, bar, phase log, or cancel", {
+  env <- load_shiny_app_env()
+  html <- rendered_html(env$task_status_ui("idle"))
+  expect_false(grepl("alert-success", html, fixed = TRUE))
+  expect_false(grepl("progress-bar-animated", html, fixed = TRUE))
+  expect_false(grepl("task-phase-log", html, fixed = TRUE))
+  expect_false(grepl("cancel_task_btn", html, fixed = TRUE))
 })
 
 test_that("retrieval failures are classified from the discarded parent", {
@@ -1207,15 +1245,17 @@ test_that("target.gpkg round-trips target geometry with merged attributes", {
     expect_s3_class(cw_result$crosswalk, "data.frame")
     expect_s3_class(cw_result$overlay_sf, "sf")
 
-    # The Shapes download is ready for a vector target with a joined table.
+    # The Shape archive is ready for a vector target with a joined table.
     expect_match(
       rendered_html(output$link_downloads_ui),
       "id=\"dl_cw_target\""
     )
 
-    gpkg_file <- output$dl_cw_target
-    expect_true(file.exists(gpkg_file))
-    back <- sf::st_read(gpkg_file, layer = "target", quiet = TRUE)
+    shapes_zip <- output$dl_cw_target
+    expect_true(file.exists(shapes_zip))
+    shapes_dir <- withr::local_tempdir()
+    utils::unzip(shapes_zip, exdir = shapes_dir)
+    back <- sf::st_read(file.path(shapes_dir, "target.gpkg"), layer = "target", quiet = TRUE)
     expect_s3_class(back, "sf")
     # Exactly one feature per target feature - catches a wrong join key.
     expect_equal(nrow(back), nrow(tgt_poly))
@@ -1263,31 +1303,35 @@ test_that("Shapes download stays disabled for a raster target", {
   })
 })
 
-test_that("downloads render as a five-button two-column grid", {
+test_that("downloads render as a uniform four-button two-column grid", {
   env <- load_shiny_app_env()
   items <- list(
-    list(id = "dl_cw_target", label = "Shapes", title = "target.gpkg", ready = TRUE),
+    list(id = "dl_cw_csv", label = "Table", title = "target_tables.zip", ready = TRUE),
+    list(id = "dl_cw_target", label = "Shape", title = "target_shapes.zip", ready = TRUE),
     list(id = "dl_cw_map", label = "Map", title = "map.html", ready = TRUE),
-    list(id = "dl_cw_csv", label = "Table", title = "mapping.csv", ready = TRUE),
-    list(id = "dl_cw_pairs", label = "Pairs", title = "pairs.csv", ready = FALSE),
     list(id = "dl_cw_script", label = "Script", title = "reproduce.R", ready = FALSE)
   )
   html <- rendered_html(env$download_or_disabled(items))
   # Two-column grid wrapper and one col-6 cell per button.
   expect_match(html, "class=\"row g-1\"", fixed = TRUE)
-  expect_equal(length(gregexpr("col-6", html, fixed = TRUE)[[1]]), 5L)
-  # Five buttons in spec order: Shapes, Map, Table, Pairs, Script.
+  expect_equal(length(gregexpr("col-6", html, fixed = TRUE)[[1]]), 4L)
+  # Four buttons in spec order: Table, Shape, Map, Script.
   pos <- function(s) regexpr(s, html, fixed = TRUE)
-  labels <- c("Shapes", "Map", "Table", "Pairs", "Script")
+  labels <- c("Table", "Shape", "Map", "Script")
   positions <- vapply(labels, pos, integer(1))
   expect_true(all(positions > 0L))
-  expect_identical(order(positions), 1:5)
+  expect_identical(order(positions), 1:4)
   # Real filenames carried as tooltips.
-  expect_match(html, "title=\"target.gpkg\"", fixed = TRUE)
+  expect_match(html, "title=\"target_shapes.zip\"", fixed = TRUE)
+  expect_match(html, "title=\"target_tables.zip\"", fixed = TRUE)
   expect_match(html, "title=\"map.html\"", fixed = TRUE)
-  # Ready items are real buttons, unready ones are disabled.
+  # Every cell uses the same visual treatment; availability only adds disabled.
+  expect_equal(
+    length(gregexpr("download-grid-button", html, fixed = TRUE)[[1]]),
+    4L
+  )
   expect_match(html, "id=\"dl_cw_target\"", fixed = TRUE)
   expect_match(html, "id=\"dl_cw_map\"", fixed = TRUE)
   expect_match(html, "id=\"dl_cw_csv\"", fixed = TRUE)
-  expect_false(grepl("id=\"dl_cw_pairs\"", html, fixed = TRUE))
+  expect_false(grepl("id=\"dl_cw_script\"", html, fixed = TRUE))
 })

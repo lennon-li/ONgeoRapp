@@ -438,10 +438,9 @@ read_uploaded_file <- function(name, datapath) {
 # TRUE, otherwise visually-matching but non-functional disabled buttons - so
 # each sidebar download is only ever clickable once the map/data it points to
 # exists. Readiness is per-item (item$ready) so, e.g., map.html can be ready
-# before mapping.csv is. A ready button lights up in the primary accent so
-# the user can see at a glance which downloads are available. Buttons sit in
-# a two-column grid (row g-1 / col-6); labels are shortened and each item's
-# real filename is carried in item$title as a tooltip.
+# before the result tables. Buttons sit in a two-column grid (row g-1 / col-6)
+# with one shared treatment; unavailable items retain their tooltip and differ
+# only by their disabled state.
 # Zip everything in `dir` and place the archive at EXACTLY `dest`.
 #
 # utils::zip() appends ".zip" whenever the target does not already end in
@@ -472,12 +471,13 @@ download_or_disabled <- function(items) {
     div(class = "col-6",
       if (isTRUE(item$ready)) {
         downloadButton(item$id, item$label,
-          class = "btn-primary w-100 mb-1", title = item$title)
+          class = "btn-primary w-100 mb-1 download-grid-button",
+          style = "height: 2.5rem;", title = item$title)
       } else {
         tags$button(
           item$label, type = "button",
-          class = "btn btn-outline-secondary w-100 mb-1",
-          title = item$title, disabled = "disabled"
+          class = "btn btn-primary w-100 mb-1 download-grid-button",
+          style = "height: 2.5rem;", title = item$title, disabled = "disabled"
         )
       }
     )
@@ -638,7 +638,7 @@ merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) 
   target_sf
 }
 
-task_status_ui <- function(state, detail = NULL) {
+task_status_ui <- function(state, detail = NULL, phases = character()) {
   labels <- c(
     idle = "Idle",
     running = "Running",
@@ -648,6 +648,20 @@ task_status_ui <- function(state, detail = NULL) {
   )
   label <- unname(labels[[state]])
   tagList(
+    # A green banner while work is in flight. Lennon: "hoping to see running
+    # with green banner or progress bar, then log msg on retrieving source
+    # data.... make the process transparent."
+    #
+    # This lives inline in the sidebar rather than in a modal. A modal was
+    # tried twice and abandoned: Shiny tore it out of the DOM within ~2s of
+    # being shown, with no removeModal() from this app -- measured in headless
+    # Chrome, present in only 3 of 60 samples, while this sidebar output
+    # updates reliably for the full run. See the note above the progress
+    # poller.
+    if (identical(state, "running")) {
+      tags$div(class = "alert alert-success py-2 px-3 mb-2", role = "status",
+        tags$strong("Running"))
+    },
     tags$p(
       class = paste("task-status text-muted", paste0("task-status-", state)),
       `data-state` = state,
@@ -667,6 +681,19 @@ task_status_ui <- function(state, detail = NULL) {
           style = "width: 100%;"
         )
       )
+    },
+    # The accumulating phase log: each step stays on screen as the next
+    # arrives, so a 30-second wait shows what it is doing rather than one
+    # unchanging sentence.
+    if (identical(state, "running") && length(phases) > 0) {
+      tags$ol(class = "task-phase-log small text-muted mt-2 mb-0",
+        lapply(phases, tags$li))
+    },
+    # Cancel lived in the modal. Removing the modal removed the only way to
+    # reach observeEvent(input$cancel_task_btn), so it moves here.
+    if (identical(state, "running")) {
+      actionButton("cancel_task_btn", "Cancel",
+        class = "btn btn-outline-secondary btn-sm w-100 mt-2")
     }
   )
 }
@@ -682,13 +709,19 @@ new_progress_path <- function() {
 }
 
 read_progress_phase <- function(path) {
+  phases <- read_progress_phases(path)
+  if (is.null(phases)) NULL else phases[length(phases)]
+}
+
+read_progress_phases <- function(path) {
   if (is.null(path) || !nzchar(path) || !file.exists(path)) {
     return(NULL)
   }
-  line <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
-  line <- line[nzchar(line)]
-  if (length(line) == 0L) NULL else line[length(line)]
+  phases <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
+  phases <- phases[nzchar(phases)]
+  if (length(phases) == 0L) NULL else phases
 }
+
 
 # --- Explicit retrieval failures ------------------------------------------
 # ONgeoR raises "Could not retrieve source 'X' ... Retry later" and attaches
@@ -1095,14 +1128,14 @@ server <- function(input, output, session) {
       # Same reasoning: a local writer over a plain path, not a closure.
       note <- function(phase) {
         if (!is.null(progress_path)) {
-          try(writeLines(phase, progress_path), silent = TRUE)
+          try(cat(phase, "\n", file = progress_path, append = TRUE), silent = TRUE)
         }
       }
-      note("Fetching source layer.")
+      note("Retrieving source data...")
       base_sf    <- ONgeoR::retrieve_source(base_id)
-      note("Fetching target layer.")
+      note("Retrieving target data...")
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
-      note("Preparing layers for the map.")
+      note("Preparing layers for the map...")
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
            base_id = base_id, overlay_id = overlay_id,
@@ -1121,7 +1154,7 @@ server <- function(input, output, session) {
       pack <- function(x) if (inherits(x, "SpatRaster")) terra::wrap(x) else x
       note <- function(phase) {
         if (!is.null(progress_path)) {
-          try(writeLines(phase, progress_path), silent = TRUE)
+          try(cat(phase, "\n", file = progress_path, append = TRUE), silent = TRUE)
         }
       }
       kind_of <- function(layer) {
@@ -1129,11 +1162,11 @@ server <- function(input, output, session) {
         types <- unique(as.character(sf::st_geometry_type(layer)))
         if (all(types %in% c("POINT", "MULTIPOINT"))) "point" else "polygon"
       }
-      note("Fetching source layer.")
+      note("Retrieving source data...")
       base_sf    <- ONgeoR::retrieve_source(base_id)
-      note("Fetching target layer.")
+      note("Retrieving target data...")
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
-      note("Joining layers.")
+      note("Joining layers...")
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
       if (base_kind == "raster" || overlay_kind == "raster") {
@@ -1157,6 +1190,7 @@ server <- function(input, output, session) {
             from_sf <- base_sf; to_sf <- overlay_sf
           }
         }
+        note("Building results table...")
         linked <- ONgeoR::link(from_sf, to_sf, predicate = "within")
         list(crosswalk = NULL, linked = linked, pairs = NULL,
              base_sf = pack(base_sf),
@@ -1168,6 +1202,7 @@ server <- function(input, output, session) {
         # layer (overlay) is the index unit the result has one row per, so it
         # is build_intersection()'s `target` argument (base is `source`).
         pairs <- ONgeoR::build_intersection(base_sf, overlay_sf)
+        note("Building results table...")
         crosswalk <- ONgeoR::summarise_by_target(pairs)
         list(crosswalk = crosswalk, linked = NULL, pairs = pairs,
              base_sf = pack(base_sf),
@@ -1178,6 +1213,7 @@ server <- function(input, output, session) {
         # target point (overlay) is matched to its nearest source point (base),
         # so overlay is build_nearest_pairs()'s `target` argument.
         pairs <- ONgeoR::build_nearest_pairs(base_sf, overlay_sf)
+        note("Building results table...")
         crosswalk <- ONgeoR::summarise_by_target(pairs)
         list(crosswalk = crosswalk, linked = NULL, pairs = pairs,
              base_sf = pack(base_sf),
@@ -1191,6 +1227,7 @@ server <- function(input, output, session) {
         # no rule to choose, so it runs build_crosswalk()'s default (within).
         from_sf   <- overlay_sf
         to_sf     <- base_sf
+        note("Building results table...")
         crosswalk <- ONgeoR::build_crosswalk(from_sf, to_sf)
         list(crosswalk = crosswalk, linked = NULL, pairs = NULL,
              base_sf = pack(base_sf),
@@ -1290,6 +1327,8 @@ server <- function(input, output, session) {
   # new_progress_path / read_progress_phase).
   preview_progress_path <- reactiveVal(NULL)
   link_progress_path <- reactiveVal(NULL)
+  preview_progress_log <- reactiveVal(character())
+  link_progress_log <- reactiveVal(character())
 
   # --- Postal upload handling ------------------------------------------
 
@@ -1405,11 +1444,11 @@ server <- function(input, output, session) {
   })
 
   output$link_task_status <- renderUI({
-    task_status_ui(link_state(), link_state_detail())
+    task_status_ui(link_state(), link_state_detail(), link_progress_log())
   })
 
   output$preview_task_status <- renderUI({
-    task_status_ui(preview_state(), preview_state_detail())
+    task_status_ui(preview_state(), preview_state_detail(), preview_progress_log())
   })
 
   # Poll the running tasks' phase files and push the phase into the status
@@ -1424,16 +1463,32 @@ server <- function(input, output, session) {
     }
     invalidateLater(500)
     if (identical(preview_state(), "running")) {
-      phase <- read_progress_phase(isolate(preview_progress_path()))
+      phases <- read_progress_phases(isolate(preview_progress_path()))
+      if (!is.null(phases)) preview_progress_log(phases)
+      phase <- if (is.null(phases)) NULL else phases[length(phases)]
       if (!is.null(phase) && !identical(phase, isolate(preview_state_detail()))) {
         preview_state_detail(phase)
       }
     }
     if (identical(link_state(), "running")) {
-      phase <- read_progress_phase(isolate(link_progress_path()))
+      phases <- read_progress_phases(isolate(link_progress_path()))
+      if (!is.null(phases)) link_progress_log(phases)
+      phase <- if (is.null(phases)) NULL else phases[length(phases)]
       if (!is.null(phase) && !identical(phase, isolate(link_state_detail()))) {
         link_state_detail(phase)
       }
+    }
+  })
+
+  observeEvent(input$cancel_task_btn, {
+    if (identical(link_state(), "running")) {
+      link_generation(link_generation() + 1L)
+      link_state("cancelled")
+      link_state_detail("Cancelled; the previous run was discarded.")
+    } else if (identical(preview_state(), "running")) {
+      preview_generation(preview_generation() + 1L)
+      preview_state("cancelled")
+      preview_state_detail("Cancelled; the previous preview was discarded.")
     }
   })
 
@@ -1518,6 +1573,7 @@ server <- function(input, output, session) {
     preview_active_generation(generation)
     path <- new_progress_path()
     preview_progress_path(path)
+    preview_progress_log(character())
     preview_state("running")
     preview_state_detail("Starting.")
     preview_task$invoke(input$base_layer, input$overlay_source, generation,
@@ -1594,6 +1650,7 @@ server <- function(input, output, session) {
     link_state("running")
     link_state_detail("Starting.")
     link_progress_path(new_progress_path())
+    link_progress_log(character())
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
@@ -1713,37 +1770,6 @@ server <- function(input, output, session) {
     tbl
   }, rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
 
-  # Target-layer geometry with the joined attributes merged on, as a
-  # GeoPackage (chosen over shapefile because shapefile truncates field names
-  # to 10 characters, which would mangle match_distance_km and the src_*/tgt_*
-  # attributes summarise_by_target() emits). Geometry must come from
-  # cw_result$overlay_sf: the internal names are inverted relative to the UI
-  # labels (base_sf is the UI "Source layer", overlay_sf the "Target layer").
-  output$dl_cw_target <- downloadHandler(
-    filename = function() "target.gpkg",
-    content = function(file) {
-      merged <- merge_target_attributes(
-        cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
-      )
-      req(merged)
-      # Shiny hands the handler a pre-created temp path; GPKG refuses to write
-      # into an existing file, so let delete_dsn clear it first.
-      sf::st_write(
-        merged, file, layer = "target", driver = "GPKG",
-        delete_dsn = TRUE, quiet = TRUE
-      )
-    }
-  )
-
-  # ESRI Shapefile variant of the merge, for tools that cannot read
-  # GeoPackage. Shapefile is lossier than GPKG: field names are limited to
-  # 10 characters and it cannot distinguish "" from NA. Attribute names are
-  # therefore shortened to unique 10-character names before writing (sf's own
-  # abbreviation can emit names longer than 10 characters that collide once
-  # GDAL truncates them further, which hard-fails the write), and the zip
-  # also ships field_names.csv mapping each original name to the name
-  # actually found in the written .dbf. A shapefile is 4+ sidecar files
-  # (.shp/.shx/.dbf/.prj), so the download is a zip.
   shp_field_names <- function(nms) {
     out <- character(0)
     for (nm in nms) {
@@ -1760,20 +1786,27 @@ server <- function(input, output, session) {
     }
     out
   }
-  output$dl_cw_shp <- downloadHandler(
-    filename = function() "target_shapefile.zip",
+
+  # Shape preserves both GeoPackage and Shapefile exports in one archive.
+  output$dl_cw_target <- downloadHandler(
+    filename = function() "target_shapes.zip",
     content = function(file) {
       merged <- merge_target_attributes(
         cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
       )
       req(merged)
+      staging <- tempfile("shapes_stage")
+      dir.create(staging)
+      on.exit(unlink(staging, recursive = TRUE), add = TRUE)
+      # GPKG refuses to write into an existing file, so let delete_dsn clear it.
+      sf::st_write(
+        merged, file.path(staging, "target.gpkg"), layer = "target", driver = "GPKG",
+        delete_dsn = TRUE, quiet = TRUE
+      )
       original <- setdiff(names(merged), attr(merged, "sf_column"))
       all_names <- names(merged)
       all_names[match(original, all_names)] <- shp_field_names(original)
       names(merged) <- all_names
-      staging <- tempfile("shp_stage")
-      dir.create(staging)
-      on.exit(unlink(staging, recursive = TRUE), add = TRUE)
       shp_path <- file.path(staging, "target.shp")
       suppressWarnings(sf::st_write(merged, shp_path, quiet = TRUE))
       stored <- sf::st_read(shp_path, quiet = TRUE)
@@ -1790,21 +1823,20 @@ server <- function(input, output, session) {
   )
 
   output$dl_cw_csv <- downloadHandler(
-    filename = function() if (!is.null(cw_result$linked)) "linked.csv" else "mapping.csv",
+    filename = function() "target_tables.zip",
     content = function(file) {
       tbl <- cw_result$crosswalk %||% cw_result$linked
       req(tbl)
-      utils::write.csv(tbl, file, row.names = FALSE)
-    }
-  )
-  # The pair-level table (one row per overlapping pair, or per matched point)
-  # behind the intersection and nearest results. Only those runs populate it;
-  # build_crosswalk and raster runs have no separate pair table.
-  output$dl_cw_pairs <- downloadHandler(
-    filename = function() "pairs.csv",
-    content = function(file) {
-      req(cw_result$pairs)
-      utils::write.csv(cw_result$pairs, file, row.names = FALSE)
+      staging <- tempfile("tables_stage")
+      dir.create(staging)
+      on.exit(unlink(staging, recursive = TRUE), add = TRUE)
+      table_name <- if (!is.null(cw_result$linked)) "linked.csv" else "mapping.csv"
+      utils::write.csv(tbl, file.path(staging, table_name), row.names = FALSE)
+      utils::write.csv(
+        cw_result$pairs %||% data.frame(),
+        file.path(staging, "pairs.csv"), row.names = FALSE
+      )
+      zip_directory_to(staging, file)
     }
   )
   output$dl_cw_map <- downloadHandler(
@@ -1834,29 +1866,22 @@ server <- function(input, output, session) {
 
   output$link_downloads_ui <- renderUI({
     has_rows <- function(x) !is.null(x) && nrow(x) > 0
-    linked_run <- !is.null(cw_result$linked)
     link_ready <- has_rows(cw_result$crosswalk) || has_rows(cw_result$linked)
-    csv_label <- if (linked_run) "linked.csv" else "mapping.csv"
-    # The Shapes download merges the joined attributes onto the target
+    # The Shape download merges the joined attributes onto the target
     # geometry, so it needs both a vector target layer and a joined table.
     # A raster target (SpatRaster) has no attribute table to merge onto, so
     # it stays disabled.
     shapes_ready <- link_ready && !is.null(cw_result$overlay_sf) &&
       !inherits(cw_result$overlay_sf, "SpatRaster")
     tagList(
-      # Two-column grid; SHP sits beside Shapes so the two vector formats
-      # pair off and the six buttons fill three even rows.
+      # A compact 2x2 grid keeps each deliverable at the same visual weight.
       download_or_disabled(list(
-        list(id = "dl_cw_target", label = "Shapes", title = "target.gpkg",
-          ready = shapes_ready),
-        list(id = "dl_cw_shp", label = "SHP", title = "target_shapefile.zip",
+        list(id = "dl_cw_csv", label = "Table", title = "target_tables.zip",
+          ready = link_ready),
+        list(id = "dl_cw_target", label = "Shape", title = "target_shapes.zip",
           ready = shapes_ready),
         list(id = "dl_cw_map", label = "Map", title = "map.html",
           ready = !is.null(cw_result$base_sf)),
-        list(id = "dl_cw_csv", label = "Table", title = csv_label,
-          ready = link_ready),
-        list(id = "dl_cw_pairs", label = "Pairs", title = "pairs.csv",
-          ready = has_rows(cw_result$pairs)),
         # reproduce.R renders a build_crosswalk script only. Raster runs
         # produce a linked values table through link(), and intersection /
         # nearest runs produce tables the script cannot rebuild, so it stays
