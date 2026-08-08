@@ -262,6 +262,14 @@ test_that("postal preview streams honest phases and ends done, no title banner",
     # browser receives has done = TRUE, and no completion message carries a
     # title claiming the run is "complete" (the honest live log is the content;
     # a success push has no title banner at all).
+    #
+    # NOTE on how it gets there: a successful preview no longer declares itself
+    # done when the map payload is sent - it waits for input$cw_map_rendered,
+    # with a render_ack_timeout_secs cap. testServer runs a MOCK CLOCK, so that
+    # cap elapses immediately here and supplies the terminal push. In a live
+    # session the browser's acknowledgement arrives first. Either way the run
+    # ends done = TRUE, which is what this test pins. The ack path itself is
+    # covered in test-progress-dialog.R.
     preview_messages <- Filter(
       function(x) identical(x$type, "ongeor-progress"),
       progress_messages
@@ -1100,14 +1108,30 @@ test_that("the progress dialog is a bare phase list with cancel and a hidden OK"
   # The dialog shell is static: its phase list is filled in from the browser by
   # the "ongeor-progress" custom message, because re-rendering anything inside
   # a live Shiny modal tore the modal out of the DOM (measured 2026-08-06).
-  # There is deliberately no title banner and no fake progress bar: the live
-  # log IS the content, each step spinning while it runs and flipping to a
-  # check + "done" when the next step starts or the run finishes.
+  # There is deliberately no title banner: the live log IS the content, each
+  # step spinning while it runs and flipping to a check + "done" when the next
+  # step starts or the run finishes.
+  #
+  # On progress bars (2026-08-07, revised): the original rule here was "no
+  # progress bar at all", because the bar that shipped implied progress while a
+  # run was actually hung. Lennon asked for a visible sign of life after a
+  # first-time layer download ran for 10+ minutes looking like a failure. The
+  # rule is therefore narrowed, not dropped: an INDETERMINATE activity bar plus
+  # an elapsed clock is allowed, because neither can state something false; a
+  # DETERMINATE bar is still banned, because the work (a paginated network
+  # download and a spatial join) exposes no fraction to report honestly.
   env <- load_shiny_app_env()
   html <- rendered_html(env$task_progress_modal("Join"))
   expect_false(grepl("alert-success", html, fixed = TRUE))
   expect_false(grepl("running...", html, fixed = TRUE))
-  expect_false(grepl("progress-bar", html, fixed = TRUE))
+  # Indeterminate only: striped + animated, never a reported value.
+  expect_match(html, "progress-bar-animated", fixed = TRUE)
+  expect_false(grepl("aria-valuenow", html, fixed = TRUE))
+  # Full-width stripes are the indeterminate idiom; any other width would be a
+  # claim about how far along the run is.
+  expect_match(html, "width: 100%", fixed = TRUE)
+  expect_match(html, 'id="task_elapsed"', fixed = TRUE)
+  expect_match(html, 'id="task_hint"', fixed = TRUE)
   expect_match(html, 'id="task_phase_list"', fixed = TRUE)
   expect_match(html, 'id="cancel_task_btn"', fixed = TRUE)
   # OK ships hidden and is revealed by the browser when the task finishes, so

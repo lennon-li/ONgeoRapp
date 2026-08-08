@@ -638,6 +638,78 @@ merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) 
   target_sf
 }
 
+# --- Map-view windowing for census layers ---------------------------------
+#
+# retrieve_census() accepts a bbox and filters server-side, but nothing in the
+# app passed one, so Aggregate Dissemination Area pulled all 1,679 features
+# province-wide and Dissemination Area all 20,465. Measured on the cache: the
+# ADA layer is 6,004,902 bytes province-wide against 44,922 bytes for a
+# city-sized window - 134x.
+#
+# Only census_* sources support this. ONgeoR::retrieve_source() does NOT
+# forward a bbox (see its census_ branch), so the windowed call goes to
+# retrieve_census() directly rather than changing the CRAN-bound library.
+is_census_source <- function(source_id) {
+  !is.null(source_id) && length(source_id) == 1L && !is.na(source_id) &&
+    startsWith(source_id, "census_")
+}
+
+# Layers this size are the ones that make the app feel broken, so the window is
+# offered pre-ticked for them and left off for the small ones.
+census_window_threshold <- 1000
+
+census_window_default <- function(source_id) {
+  if (!is_census_source(source_id)) return(FALSE)
+  reg <- tryCatch(ONgeoR::list_sources(), error = function(e) NULL)
+  if (is.null(reg) || is.null(reg$feature_count)) return(FALSE)
+  n <- suppressWarnings(as.numeric(reg$feature_count[match(source_id, reg$source_id)]))
+  isTRUE(n >= census_window_threshold)
+}
+
+# leaflet publishes the visible extent as input$<id>_bounds. Returns the
+# EPSG:4326 xmin, ymin, xmax, ymax vector retrieve_census() expects, or NULL if
+# the map has not reported a usable extent yet.
+map_view_bbox <- function(bounds) {
+  if (!is.list(bounds)) return(NULL)
+  needed <- c("west", "south", "east", "north")
+  if (!all(needed %in% names(bounds))) return(NULL)
+  v <- suppressWarnings(as.numeric(unlist(bounds[needed], use.names = FALSE)))
+  if (length(v) != 4L || any(!is.finite(v))) return(NULL)
+  if (v[1] >= v[3] || v[2] >= v[4]) return(NULL)
+  v
+}
+
+# One honest line about what this run will cost, sized from the registry's own
+# feature counts. Deliberately not an estimate in seconds: the dominant cost is
+# a one-time network download whose duration depends on the network, and a
+# wrong number is worse than an honest "this may take minutes".
+run_hint_text <- function(ids) {
+  ids <- ids[!is.na(ids)]
+  ids <- setdiff(ids[nzchar(ids)], "postal_upload")
+  if (!length(ids)) return("")
+  reg <- tryCatch(ONgeoR::list_sources(), error = function(e) NULL)
+  if (is.null(reg) || is.null(reg$feature_count)) return("")
+  counts <- suppressWarnings(as.numeric(
+    reg$feature_count[match(ids, reg$source_id)]
+  ))
+  counts <- counts[!is.na(counts)]
+  if (!length(counts)) return("")
+  biggest <- max(counts)
+  if (biggest >= 1000) {
+    sprintf(paste(
+      "Heads up: the largest layer in this run has %s features. The first time",
+      "it is downloaded this can take several minutes. It is cached afterwards,",
+      "so the same layer is fast next time. Good moment for a coffee - the",
+      "elapsed clock below keeps ticking while it works."
+    ), format(biggest, big.mark = ","))
+  } else {
+    paste(
+      "Layers are downloaded once and cached, so the first run on a layer is the",
+      "slow one. The elapsed clock below keeps ticking while it works."
+    )
+  }
+}
+
 task_status_ui <- function(state, detail = NULL, phases = character()) {
   labels <- c(
     idle = "Idle",
@@ -677,6 +749,23 @@ task_progress_modal <- function(operation) {
   modalDialog(
     title = NULL,
     tags$ul(id = "task_phase_list", class = "task-phase-log list-unstyled mb-0"),
+    # What to expect, and proof the app is alive. The elapsed counter is the
+    # honest substitute for a percentage bar: the work is a network download
+    # and a spatial join with no reportable fraction, so a filling bar would be
+    # inventing progress. A ticking clock cannot be wrong.
+    tags$div(id = "task_hint", class = "task-hint text-muted small mt-3"),
+    tags$div(class = "d-flex align-items-center mt-2",
+      tags$div(id = "task_activity",
+        class = "progress flex-grow-1 me-3",
+        style = "height: 4px;",
+        tags$div(
+          class = paste("progress-bar progress-bar-striped",
+            "progress-bar-animated bg-secondary"),
+          style = "width: 100%;"
+        )
+      ),
+      tags$span(id = "task_elapsed", class = "text-muted small font-monospace")
+    ),
     footer = tagList(
       actionButton("cancel_task_btn", "Cancel", class = "btn-outline-secondary"),
       actionButton("progress_ok_btn", "OK", class = "btn-primary d-none")
@@ -719,13 +808,44 @@ task_progress_js <- tags$script(HTML("
       html += '<li class=\"task-phase text-danger mt-2\"><strong>' + esc(m.title) + '</strong></li>';
     }
     list.innerHTML = html;
+    var hint = document.getElementById('task_hint');
+    if (hint) hint.innerHTML = m.done ? '' : esc(m.hint || '');
+    var bar = document.getElementById('task_activity');
+    if (bar) bar.style.display = m.done ? 'none' : '';
     var cancel = document.getElementById('cancel_task_btn');
     var okb = document.getElementById('progress_ok_btn');
     if (m.done) {
       if (cancel) cancel.classList.add('d-none');
       if (okb) okb.classList.remove('d-none');
     }
+    startClock(m.done);
     return true;
+  }
+
+  // Elapsed time, ticked in the browser. Server-side ticking would need a
+  // round trip per second and would freeze exactly when the page is busy -
+  // i.e. when the user most needs to see that something is still alive.
+  var t0 = null, timer = null;
+  function fmt(s){
+    var m = Math.floor(s / 60), r = s % 60;
+    return m + ':' + (r < 10 ? '0' : '') + r;
+  }
+  function startClock(done){
+    var el = document.getElementById('task_elapsed');
+    if (!el) return;
+    if (done) {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (t0) el.textContent = fmt(Math.round((Date.now() - t0) / 1000)) + ' elapsed';
+      return;
+    }
+    if (timer) return;
+    t0 = Date.now();
+    el.textContent = '0:00';
+    timer = setInterval(function(){
+      var e = document.getElementById('task_elapsed');
+      if (!e) { clearInterval(timer); timer = null; return; }
+      e.textContent = fmt(Math.round((Date.now() - t0) / 1000));
+    }, 1000);
   }
   Shiny.addCustomMessageHandler('ongeor-progress', function(m){
     latest = m;
@@ -1090,6 +1210,7 @@ ui <- bslib::page_fillable(
       ),
       tags$div(class = "slot-block slot-base",
         selectInput("base_layer", "2. Source layer to join from", choices = source_choices_grouped(), selected = "phu_boundaries"),
+        uiOutput("census_window_ui"),
         tags$div(class = "slot-meta",
           uiOutput("base_geom_badge"),
           checkboxInput("base_upload_own", "Use my own file", FALSE)
@@ -1156,7 +1277,8 @@ server <- function(input, output, session) {
   preview_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                      generation,
                                                      postal_layer = NULL,
-                                                     progress_path = NULL) {
+                                                     progress_path = NULL,
+                                                     bbox = NULL) {
     promises::future_promise({
       # Defined INSIDE the future block on purpose. The app-level
       # pack_spatial() is a closure over the app source environment, which
@@ -1173,10 +1295,24 @@ server <- function(input, output, session) {
           ), silent = TRUE)
         }
       }
-      note("Retrieving source data...")
-      base_sf    <- ONgeoR::retrieve_source(base_id)
+      # Defined inside the future for the same reason as pack()/note(): a local
+      # copy exports cleanly. `bbox` is a plain numeric vector, so it crosses
+      # the boundary without packing.
+      fetch <- function(id) {
+        if (!is.null(bbox) && startsWith(id, "census_")) {
+          ONgeoR::retrieve_census(id, bbox = bbox)
+        } else {
+          ONgeoR::retrieve_source(id)
+        }
+      }
+      note(if (is.null(bbox)) {
+        "Retrieving source data..."
+      } else {
+        "Retrieving source data (current map view only)..."
+      })
+      base_sf    <- fetch(base_id)
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
+      overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
       note("Preparing layers for the map...")
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
@@ -1188,7 +1324,8 @@ server <- function(input, output, session) {
   build_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                    generation,
                                                    postal_layer = NULL,
-                                                   progress_path = NULL) {
+                                                   progress_path = NULL,
+                                                   bbox = NULL) {
     promises::future_promise({
       # Local copies, not the app-level pack_spatial()/layer_geom() - see the
       # note in preview_task: those closures enclose the multisession plan and
@@ -1206,10 +1343,21 @@ server <- function(input, output, session) {
         types <- unique(as.character(sf::st_geometry_type(layer)))
         if (all(types %in% c("POINT", "MULTIPOINT"))) "point" else "polygon"
       }
-      note("Retrieving source data...")
-      base_sf    <- ONgeoR::retrieve_source(base_id)
+      fetch <- function(id) {
+        if (!is.null(bbox) && startsWith(id, "census_")) {
+          ONgeoR::retrieve_census(id, bbox = bbox)
+        } else {
+          ONgeoR::retrieve_source(id)
+        }
+      }
+      note(if (is.null(bbox)) {
+        "Retrieving source data..."
+      } else {
+        "Retrieving source data (current map view only)..."
+      })
+      base_sf    <- fetch(base_id)
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(postal_layer)) postal_layer else ONgeoR::retrieve_source(overlay_id)
+      overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
       note("Joining layers...")
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
@@ -1495,6 +1643,34 @@ server <- function(input, output, session) {
     task_status_ui(preview_state(), preview_state_detail(), preview_progress_log())
   })
 
+  # Shown only for census layers, which are the only sources that accept a
+  # bbox. Deliberately an explicit, visible control rather than silent
+  # windowing: a quietly partial province is the "silent success" failure this
+  # codebase keeps hitting - the user would get a fast, plausible, wrong answer.
+  output$census_window_ui <- renderUI({
+    req(input$base_layer)
+    if (!is_census_source(input$base_layer)) return(NULL)
+    tagList(
+      checkboxInput(
+        "limit_to_view",
+        "Limit to current map view",
+        value = census_window_default(input$base_layer)
+      ),
+      tags$p(class = "text-muted small mt-n2",
+        paste("Retrieves only the features intersecting the visible map extent.",
+          "Much faster for fine geographies - and the results cover only what",
+          "you can see. Untick for the whole province."))
+    )
+  })
+
+  # NULL means "no window": either the layer does not support one, the user
+  # unticked it, or the map has not reported an extent yet.
+  requested_bbox <- function() {
+    if (!isTRUE(isolate(input$limit_to_view))) return(NULL)
+    if (!is_census_source(isolate(input$base_layer))) return(NULL)
+    map_view_bbox(isolate(input$cw_map_bounds))
+  }
+
   # Poll the running tasks' phase files and push the phase into the status
   # line. A future cannot write to a reactiveVal, so the file is the channel;
   # this observer is the only thing that reads it. It reschedules itself only
@@ -1513,7 +1689,11 @@ server <- function(input, output, session) {
       if (!is.null(phase) && !identical(phase, isolate(preview_state_detail()))) {
         preview_state_detail(phase)
       }
-      push_progress(phases %||% character(), done = FALSE)
+      # Never push an empty list: the browser handler assigns innerHTML
+      # unconditionally, so an empty push ERASES whatever the dialog is
+      # showing. Before the worker writes its first phase line this would
+      # blank the seeded "Starting" line twice a second.
+      if (!is.null(phases)) push_progress(phases, done = FALSE)
     }
     if (identical(link_state(), "running")) {
       phases <- read_progress_phases(isolate(link_progress_path()))
@@ -1522,7 +1702,7 @@ server <- function(input, output, session) {
       if (!is.null(phase) && !identical(phase, isolate(link_state_detail()))) {
         link_state_detail(phase)
       }
-      push_progress(phases %||% character(), done = FALSE)
+      if (!is.null(phases)) push_progress(phases, done = FALSE)
     }
   })
 
@@ -1531,21 +1711,88 @@ server <- function(input, output, session) {
   # Shown once when work starts, updated from the browser, and dismissed by
   # the user with OK. It is never re-rendered by Shiny while open; see the
   # note on task_progress_modal() for the two approaches that failed.
+  # What the user should expect from THIS run. Computed once when the dialog
+  # opens, in a plain environment, because push_progress() is also called from
+  # a later::later() callback where there is no reactive context to read
+  # inputs from.
+  dialog_hint <- new.env(parent = emptyenv())
+  dialog_hint$text <- ""
+
   push_progress <- function(phases, done, ok = TRUE, title = NULL) {
     session$sendCustomMessage("ongeor-progress", list(
       phases = as.list(as.character(phases)),
       done = isTRUE(done),
       ok = isTRUE(ok),
-      title = title %||% ""
+      title = title %||% "",
+      hint = dialog_hint$text %||% ""
     ))
   }
 
   progress_dialog_open <- reactiveVal(FALSE)
 
   open_progress_dialog <- function(op) {
+    dialog_hint$text <- tryCatch(
+      run_hint_text(c(isolate(input$base_layer), isolate(input$overlay_source))),
+      error = function(e) ""
+    )
     showModal(task_progress_modal(op))
     progress_dialog_open(TRUE)
+    # Seed one visible phase immediately. The dialog's body is an empty <ul>
+    # until a push fills it, and the worker's first phase line does not exist
+    # until the future starts, so without this the user is shown a blank box
+    # with a lone Cancel button and no evidence anything is happening.
+    push_progress("Starting", done = FALSE)
   }
+
+  # --- Preview render acknowledgement --------------------------------------
+  #
+  # A preview is finished when the BROWSER has drawn the map, not when the
+  # server has sent it. The terminal push is therefore owned by
+  # input$cw_map_rendered (emitted by the widget's onRender above), with a cap
+  # so a signal that never arrives cannot hang the dialog open forever.
+  #
+  # Deliberately NOT reactive. This state is entered from inside the
+  # ExtendedTask promise-resolution flush, and a reactiveVal written there
+  # invalidates its observers without ever re-flushing them - the trap that
+  # made the previous render-signal attempt hang and got it deleted on
+  # 2026-08-07. A plain environment plus later::later() avoids reactivity, and
+  # the acknowledging observer is driven by a client input, which always
+  # starts its own flush.
+  render_ack_timeout_secs <- 20
+  render_ack <- new.env(parent = emptyenv())
+  render_ack$awaiting <- FALSE
+  render_ack$phases <- character()
+  render_ack$token <- 0L
+
+  finish_preview_render <- function(token = NULL) {
+    if (!isTRUE(render_ack$awaiting)) return(invisible(FALSE))
+    # A stale timer from a superseded preview must not close a newer dialog.
+    if (!is.null(token) && !identical(token, render_ack$token)) {
+      return(invisible(FALSE))
+    }
+    render_ack$awaiting <- FALSE
+    try(push_progress(render_ack$phases, done = TRUE, ok = TRUE, title = NULL),
+      silent = TRUE)
+    invisible(TRUE)
+  }
+
+  await_preview_render <- function(phases) {
+    render_ack$awaiting <- TRUE
+    render_ack$phases <- phases
+    render_ack$token <- render_ack$token + 1L
+    token <- render_ack$token
+    # Last phase keeps spinning until the browser confirms the draw.
+    push_progress(phases, done = FALSE)
+    later::later(function() finish_preview_render(token), render_ack_timeout_secs)
+    invisible(NULL)
+  }
+
+  # Test seam: exercise the cap without waiting out the timer.
+  force_render_ack_timeout <- function() finish_preview_render()
+
+  observeEvent(input$cw_map_rendered, {
+    finish_preview_render()
+  }, ignoreInit = TRUE)
 
   # Preview opens its own dialog. Join reuses the confirmation dialog already
   # on screen -- Lennon: "combine with the existing pop up" -- so the confirm
@@ -1577,7 +1824,16 @@ server <- function(input, output, session) {
     st <- preview_state()
     if (st %in% c("completed", "failed", "cancelled")) {
       unlink(isolate(preview_progress_path()) %||% character())
-      finish_progress(st, isolate(preview_progress_log()), "Preview")
+      # "completed" is deliberately NOT finished here. A successful preview is
+      # only done once the browser reports the map drawn (await_preview_render),
+      # and this observer must not pre-empt that with a premature done = TRUE.
+      # It never re-fires in a live session anyway - it is invalidated inside
+      # the promise-resolution flush - but testServer flushes manually, so
+      # leaving it in place made the dialog honest in production and dishonest
+      # under test, which is the wrong way round.
+      if (!identical(st, "completed")) {
+        finish_progress(st, isolate(preview_progress_log()), "Preview")
+      }
     }
   }, ignoreInit = TRUE)
 
@@ -1690,7 +1946,7 @@ server <- function(input, output, session) {
     preview_state("running")
     preview_state_detail("Starting.")
     preview_task$invoke(input$base_layer, input$overlay_source, generation,
-      postal_layer, path)
+      postal_layer, path, requested_bbox())
   })
 
   observeEvent(preview_task$status(), {
@@ -1749,12 +2005,14 @@ server <- function(input, output, session) {
     cw_result$previewed <- c(result$base_id, result$overlay_id)
     preview_state("completed")
     preview_state_detail("Both layers are on the map.")
-    # Terminal push made directly, not via an observeEvent(preview_state()):
-    # a reactiveVal write inside this ExtendedTask promise-resolution flush
-    # invalidates its observers but they are never re-flushed, so the chained
-    # finish_progress() never ran and the dialog hung on the last spinner. The
-    # phase file is unlinked only after its final read above.
-    push_progress(phases, done = TRUE, ok = TRUE, title = NULL)
+    # The terminal push is NOT made here. The map payload goes out in this same
+    # flush, but the browser then blocks for seconds drawing it, so declaring
+    # "done" now is a claim the user can watch being false. await_preview_render()
+    # keeps the last phase spinning and hands the terminal push to
+    # input$cw_map_rendered (or to the cap). It is still not routed through an
+    # observeEvent(preview_state()): observers invalidated inside this
+    # promise-resolution flush are never re-flushed.
+    await_preview_render(phases)
     unlink(isolate(preview_progress_path()) %||% character())
   }, ignoreInit = TRUE)
 
@@ -1773,22 +2031,38 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$confirm_join_btn, {
-    # Do NOT removeModal() here: the confirmation dialog is replaced in place
-    # by the progress dialog, so the user never sees a flash of bare page.
-    open_progress_dialog("Join")
+    # Every guard below runs BEFORE the dialog is opened. Opening it first put a
+    # box on screen that three separate early returns then abandoned: no task
+    # was invoked, no phase was ever written, and finish_progress() never fired,
+    # so the user was left with a permanently blank dialog whose only control
+    # was Cancel. Reproduced by joining the same pair twice.
     req(input$base_layer, input$overlay_source)
     requested_inputs <- list(
       base_layer = input$base_layer,
       overlay_source = input$overlay_source
     )
+    postal_layer <- NULL
+    if (identical(input$overlay_source, "postal_upload")) {
+      pr <- postal_result()
+      req(pr, pr$sf)
+      postal_layer <- pr$sf
+    }
     has_current_result <- !is.null(cw_result$crosswalk) ||
       !is.null(cw_result$linked)
     if (identical(link_state(), "completed") &&
         identical(link_active_inputs(), requested_inputs) &&
         has_current_result) {
+      # Nothing to run, but the confirmation dialog is still on screen and must
+      # be replaced by something the user can dismiss - not a blank box.
       link_state_detail("Current results are already ready; no work restarted.")
+      open_progress_dialog("Join")
+      push_progress("Results are already up to date", done = TRUE, ok = TRUE,
+        title = NULL)
       return()
     }
+    # Do NOT removeModal() here: the confirmation dialog is replaced in place
+    # by the progress dialog, so the user never sees a flash of bare page.
+    open_progress_dialog("Join")
     generation <- link_generation()
     link_active_generation(generation)
     link_active_inputs(requested_inputs)
@@ -1810,7 +2084,8 @@ server <- function(input, output, session) {
       input$overlay_source,
       generation,
       postal_layer,
-      isolate(link_progress_path())
+      isolate(link_progress_path()),
+      requested_bbox()
     )
   })
 
@@ -1904,8 +2179,26 @@ server <- function(input, output, session) {
     map
   })
 
+  # The widget reports back when it has finished drawing. Leaflet renders the
+  # whole layer set synchronously on the browser's single JS thread, so a
+  # preview of 11,625 points blocks for seconds AFTER the server has sent the
+  # payload. Without this signal the dialog claimed "Mapping data - done" and
+  # revealed OK at send time, and the user's OK click then queued behind the
+  # render - the map appeared long before the dialog would close.
+  #
+  # requestAnimationFrame + setTimeout(0) defers the signal past the paint that
+  # follows the render call, so the acknowledgement means "drawn", not "queued".
   output$cw_map <- renderLeaflet({
-    link_map()
+    htmlwidgets::onRender(link_map(), "
+      function(el, x) {
+        requestAnimationFrame(function() {
+          setTimeout(function() {
+            if (window.Shiny && Shiny.setInputValue) {
+              Shiny.setInputValue('cw_map_rendered', Date.now(), {priority: 'event'});
+            }
+          }, 0);
+        });
+      }")
   })
   # Shows whichever mode the last run produced: the target-level table
   # (build_crosswalk, or summarise_by_target() for intersection/nearest) or a
