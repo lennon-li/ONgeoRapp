@@ -670,15 +670,13 @@ task_status_ui <- function(state, detail = NULL, phases = character()) {
 # removeModal() from this app and no server error. Updating innerHTML from JS
 # leaves the dialog element untouched, so it survives.
 task_progress_modal <- function(operation) {
+  # No title: the live log IS the content. Each step shows a spinner while it
+  # runs and flips to a check + "done" when the next step starts or the whole
+  # run finishes; OK is revealed only at genuine completion. `operation` is kept
+  # for the existing callers but is no longer displayed.
   modalDialog(
     title = NULL,
-    tags$div(id = "task_banner", class = "alert alert-success mb-3",
-      role = "status", tags$strong(paste0(operation, " running..."))),
-    tags$div(id = "task_bar_wrap", class = "progress mb-3",
-      style = "height: 6px;", role = "progressbar",
-      tags$div(class = "progress-bar progress-bar-striped progress-bar-animated",
-        style = "width: 100%;")),
-    tags$ol(id = "task_phase_list", class = "task-phase-log mb-0"),
+    tags$ul(id = "task_phase_list", class = "task-phase-log list-unstyled mb-0"),
     footer = tagList(
       actionButton("cancel_task_btn", "Cancel", class = "btn-outline-secondary"),
       actionButton("progress_ok_btn", "OK", class = "btn-primary d-none")
@@ -687,32 +685,57 @@ task_progress_modal <- function(operation) {
   )
 }
 
-# Browser-side updater. Rewrites the phase list, and on finish swaps the
-# banner, stops the bar, and reveals OK so the user dismisses the dialog
-# themselves rather than having it vanish.
+# Browser-side updater. Renders the phase list as a live checklist: every step
+# except the currently running one shows a check and "done"; the running step
+# shows a spinner. When the run finishes (m.done), every step is marked done and
+# OK is revealed. A failed/cancelled run appends a red status line. There is no
+# title banner and no fake progress bar.
 task_progress_js <- tags$script(HTML("
-Shiny.addCustomMessageHandler('ongeor-progress', function(m) {
-  var list = document.getElementById('task_phase_list');
-  if (!list) return;
-  var html = '';
-  for (var i = 0; i < m.phases.length; i++) {
-    html += '<li>' + m.phases[i] + '</li>';
-  }
-  list.innerHTML = html;
-  if (m.done) {
-    var banner = document.getElementById('task_banner');
-    if (banner) {
-      banner.className = 'alert mb-3 ' + (m.ok ? 'alert-success' : 'alert-danger');
-      banner.innerHTML = '<strong>' + m.title + '</strong>';
+(function(){
+  function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  var latest = null;
+  // Render the buffered state into the dialog. Returns false if the dialog DOM
+  // is not present yet, so the caller can retry: a fast run can complete before
+  // showModal() has rendered, and a dropped message would hang the dialog.
+  function render(){
+    var list = document.getElementById('task_phase_list');
+    if (!list) return false;
+    var m = latest; if (!m) return true;
+    var html = '';
+    for (var i = 0; i < m.phases.length; i++) {
+      var label = esc(m.phases[i]).replace(/\\s*\\.\\.\\.$/, '');
+      var done = m.done || (i !== m.phases.length - 1);
+      if (done) {
+        html += '<li class=\"task-phase task-phase-done mb-1\">' +
+                '<span class=\"task-phase-check text-success me-2\">\\u2713</span>' +
+                label + ' &mdash; <span class=\"text-muted\">done</span></li>';
+      } else {
+        html += '<li class=\"task-phase task-phase-active mb-1\">' +
+                '<span class=\"spinner-border spinner-border-sm text-secondary me-2\" role=\"status\" aria-hidden=\"true\"></span>' +
+                label + '&hellip;</li>';
+      }
     }
-    var bar = document.getElementById('task_bar_wrap');
-    if (bar) bar.style.display = 'none';
+    if (m.done && !m.ok && m.title) {
+      html += '<li class=\"task-phase text-danger mt-2\"><strong>' + esc(m.title) + '</strong></li>';
+    }
+    list.innerHTML = html;
     var cancel = document.getElementById('cancel_task_btn');
-    if (cancel) cancel.classList.add('d-none');
     var okb = document.getElementById('progress_ok_btn');
-    if (okb) okb.classList.remove('d-none');
+    if (m.done) {
+      if (cancel) cancel.classList.add('d-none');
+      if (okb) okb.classList.remove('d-none');
+    }
+    return true;
   }
-});
+  Shiny.addCustomMessageHandler('ongeor-progress', function(m){
+    latest = m;
+    if (render()) return;
+    var tries = 0;
+    var iv = setInterval(function(){
+      if (render() || ++tries > 60) clearInterval(iv);
+    }, 40);
+  });
+})();
 "))
 
 # --- Phase reporting across the future boundary ---------------------------
@@ -1145,7 +1168,9 @@ server <- function(input, output, session) {
       # Same reasoning: a local writer over a plain path, not a closure.
       note <- function(phase) {
         if (!is.null(progress_path)) {
-          try(cat(phase, "\n", file = progress_path, append = TRUE), silent = TRUE)
+          try(cat(
+            phase, "\n", sep = "", file = progress_path, append = TRUE
+          ), silent = TRUE)
         }
       }
       note("Retrieving source data...")
@@ -1171,7 +1196,9 @@ server <- function(input, output, session) {
       pack <- function(x) if (inherits(x, "SpatRaster")) terra::wrap(x) else x
       note <- function(phase) {
         if (!is.null(progress_path)) {
-          try(cat(phase, "\n", file = progress_path, append = TRUE), silent = TRUE)
+          try(cat(
+            phase, "\n", sep = "", file = progress_path, append = TRUE
+          ), silent = TRUE)
         }
       }
       kind_of <- function(layer) {
@@ -1534,7 +1561,11 @@ server <- function(input, output, session) {
   finish_progress <- function(state, phases, what) {
     if (!isTRUE(isolate(progress_dialog_open()))) return()
     title <- switch(state,
-      completed = paste(what, "complete."),
+      completed = if (identical(what, "Preview")) {
+        "Both layers are on the map."
+      } else {
+        paste(what, "complete.")
+      },
       failed    = paste(what, "failed."),
       cancelled = paste(what, "cancelled."),
       paste(what, state))
@@ -1545,6 +1576,7 @@ server <- function(input, output, session) {
   observeEvent(preview_state(), {
     st <- preview_state()
     if (st %in% c("completed", "failed", "cancelled")) {
+      unlink(isolate(preview_progress_path()) %||% character())
       finish_progress(st, isolate(preview_progress_log()), "Preview")
     }
   }, ignoreInit = TRUE)
@@ -1665,19 +1697,43 @@ server <- function(input, output, session) {
     s <- preview_task$status()
     if (!s %in% c("success", "error")) return()
     if (!identical(preview_active_generation(), preview_generation())) return()
-    unlink(isolate(preview_progress_path()) %||% character())
     result <- tryCatch(preview_task$result(), error = function(e) e)
     if (inherits(result, "error")) {
       described <- describe_retrieval_failure(result)
+      unlink(isolate(preview_progress_path()) %||% character())
       preview_state("failed")
       preview_state_detail(described$message)
       showNotification(retrieval_failure_notification(described),
         type = "error", duration = NULL)
+      # Terminal push made directly: an observeEvent(preview_state()) fired from
+      # this ExtendedTask promise-resolution flush does not re-run, so the modal
+      # would otherwise hang on the last spinner. See the success path below.
+      push_progress(isolate(preview_progress_log()), done = TRUE, ok = FALSE,
+        title = "Preview failed.")
       return()
     }
-    preview_state("completed")
-    preview_state_detail("Both layers are on the map.")
     if (!identical(result$generation, preview_generation())) return()
+
+    # The mapping phase is owned by the main process, after the future returns.
+    # Record it in the phase log so the dialog shows it, then unpack the layers,
+    # hand them to Leaflet, declare completion, and push the terminal dialog
+    # state -- all in this one reactive cycle. The terminal push is made here
+    # directly rather than via the observeEvent(preview_state()) below, because a
+    # reactiveVal write inside this ExtendedTask promise-resolution flush does
+    # not re-run its observers (see the push_progress call at the end of this
+    # block). The map data goes out in the same flush, so the dialog's final
+    # "done"/OK and the map appear together, driven entirely by the main R
+    # process, so it cannot hang waiting on a browser render signal.
+    path <- isolate(preview_progress_path())
+    if (!is.null(path)) {
+      try(cat("Mapping data...\n", file = path, append = TRUE), silent = TRUE)
+    }
+    phases <- read_progress_phases(path)
+    if (is.null(phases)) {
+      phases <- c(isolate(preview_progress_log()), "Mapping data...")
+    }
+    preview_progress_log(phases)
+
     cw_result$base_sf <- unpack_spatial(result$base_sf)
     cw_result$overlay_sf <- unpack_spatial(result$overlay_sf)
     # A fresh preview invalidates any stale link results - the Data tab
@@ -1691,9 +1747,15 @@ server <- function(input, output, session) {
     # changing either picker after a preview re-greys Link. Only set on
     # success; an error path below leaves this untouched.
     cw_result$previewed <- c(result$base_id, result$overlay_id)
-    # No modal here: previewing is a look, not a commitment, so it should not
-    # interrupt. The pairing explanation now appears on Join instead, where the
-    # user is actually about to spend time and needs to confirm the semantics.
+    preview_state("completed")
+    preview_state_detail("Both layers are on the map.")
+    # Terminal push made directly, not via an observeEvent(preview_state()):
+    # a reactiveVal write inside this ExtendedTask promise-resolution flush
+    # invalidates its observers but they are never re-flushed, so the chained
+    # finish_progress() never ran and the dialog hung on the last spinner. The
+    # phase file is unlinked only after its final read above.
+    push_progress(phases, done = TRUE, ok = TRUE, title = NULL)
+    unlink(isolate(preview_progress_path()) %||% character())
   }, ignoreInit = TRUE)
 
   # Join asks first. build_btn only opens the confirmation; confirm_join_btn
@@ -1834,11 +1896,12 @@ server <- function(input, output, session) {
     zoom_inset <- 0.12
     inset_x <- (ontario[["xmax"]] - ontario[["xmin"]]) * zoom_inset / 2
     inset_y <- (ontario[["ymax"]] - ontario[["ymin"]]) * zoom_inset / 2
-    leaflet::fitBounds(
+    map <- leaflet::fitBounds(
       map,
       lng1 = ontario[["xmin"]] + inset_x, lat1 = ontario[["ymin"]] + inset_y,
       lng2 = ontario[["xmax"]] - inset_x, lat2 = ontario[["ymax"]] - inset_y
     )
+    map
   })
 
   output$cw_map <- renderLeaflet({

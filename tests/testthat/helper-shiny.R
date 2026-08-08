@@ -92,6 +92,11 @@ wait_for_extended_task <- function(task, session, timeout = 5) {
     status <- shiny::isolate(task$status())
     if (status %in% c("success", "error")) {
       later::run_now(timeoutSecs = 0.01)
+      # The task's status observer appends the mapping phase, unpacks the
+      # layers, declares completion and pushes the terminal dialog state all in
+      # one cycle. Flush once for that observer and again for the outputs it
+      # invalidates (the map, the status line).
+      session$flushReact()
       session$flushReact()
       return(status)
     }

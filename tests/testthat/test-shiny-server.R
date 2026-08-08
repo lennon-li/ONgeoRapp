@@ -175,11 +175,21 @@ test_that("preview then Link produces a crosswalk and enables downloads", {
   })
 })
 
-test_that("preview reports running then completed in its own status line", {
+test_that("postal preview streams honest phases and ends done, no title banner", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
 
   layers <- shiny_fixture_layers()
+  postal_sf <- sf::st_as_sf(
+    tibble::tibble(
+      postal_code = c("K1A 0B1", "M5V 2T6"),
+      point_source = c("geonames", "lia"),
+      point_method = c("place", "address"),
+      lon = c(-75.7, -79.4),
+      lat = c(45.4, 43.7)
+    ),
+    coords = c("lon", "lat"), crs = 4326
+  )
   testthat::local_mocked_bindings(
     list_sources = shiny_fixture_registry,
     get_source = shiny_fixture_metadata,
@@ -187,28 +197,85 @@ test_that("preview reports running then completed in its own status line", {
       Sys.sleep(0.05)
       layers[[source_id]]
     },
+    resolve_postal_points = function(x, as_sf = FALSE) postal_sf,
     .package = "ONgeoR"
   )
   server <- load_shiny_server()
   use_sequential_futures()
 
   shiny::testServer(server, {
-    session$setInputs(base_layer = "base_polygon", overlay_source = "overlay_point")
+    progress_messages <- list()
+    session$sendCustomMessage <- function(type, message) {
+      progress_messages[[length(progress_messages) + 1L]] <<- list(
+        type = type,
+        message = message
+      )
+    }
+
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(postal = c("K1A 0B1", "M5V 2T6")),
+      csv_file,
+      row.names = FALSE
+    )
+    session$setInputs(postal_file = list(
+      name = "postal-codes.csv",
+      datapath = csv_file
+    ))
+    session$flushReact()
+    session$setInputs(postal_column = "postal")
+    session$flushReact()
     expect_match(rendered_html(output$preview_task_status), "Idle")
 
     session$setInputs(preview_btn = 1)
-    # Running, with the animated bar and a phase file to poll.
     running <- rendered_html(output$preview_task_status)
     expect_match(running, "Running", fixed = TRUE)
-    # The bar moved into the progress dialog; the sidebar is a plain line now.
     expect_match(running, 'data-state="running"', fixed = TRUE)
     expect_false(grepl("progress-bar-animated", running, fixed = TRUE))
     expect_true(nzchar(preview_progress_path()))
 
+    # Completion is owned by the main process the moment the future resolves:
+    # the mapping phase is appended, the layers are unpacked, and the terminal
+    # dialog push (done = TRUE) goes out in the same reactive cycle. There is no
+    # browser render signal to wait for, so the dialog cannot hang on a spinner.
     expect_identical(wait_for_extended_task(preview_task, session), "success")
+    expect_identical(preview_state(), "completed")
+    expect_identical(
+      preview_progress_log(),
+      c(
+        "Retrieving source data...",
+        "Retrieving target data...",
+        "Preparing layers for the map...",
+        "Mapping data..."
+      )
+    )
+
     done <- rendered_html(output$preview_task_status)
     expect_match(done, "Completed", fixed = TRUE)
     expect_false(grepl("progress-bar", done, fixed = TRUE))
+
+    # The dialog ends in a done state: the last ongeor-progress message the
+    # browser receives has done = TRUE, and no completion message carries a
+    # title claiming the run is "complete" (the honest live log is the content;
+    # a success push has no title banner at all).
+    preview_messages <- Filter(
+      function(x) identical(x$type, "ongeor-progress"),
+      progress_messages
+    )
+    expect_true(isTRUE(preview_messages[[length(preview_messages)]]$message$done))
+    done_messages <- Filter(
+      function(x) isTRUE(x$message$done),
+      preview_messages
+    )
+    expect_gte(length(done_messages), 1L)
+    for (msg in done_messages) {
+      expect_false(grepl("complete", msg$message$title %||% "", ignore.case = TRUE))
+    }
+
     # The phase file is cleaned up once the task settles.
     expect_false(file.exists(preview_progress_path()))
   })
@@ -1029,15 +1096,18 @@ test_that("the phase log accumulates in order and tolerates a missing file", {
   expect_null(env$read_progress_phase(NULL))
 })
 
-test_that("the progress dialog carries a banner, a bar, a phase list, cancel and OK", {
+test_that("the progress dialog is a bare phase list with cancel and a hidden OK", {
   # The dialog shell is static: its phase list is filled in from the browser by
   # the "ongeor-progress" custom message, because re-rendering anything inside
   # a live Shiny modal tore the modal out of the DOM (measured 2026-08-06).
+  # There is deliberately no title banner and no fake progress bar: the live
+  # log IS the content, each step spinning while it runs and flipping to a
+  # check + "done" when the next step starts or the run finishes.
   env <- load_shiny_app_env()
   html <- rendered_html(env$task_progress_modal("Join"))
-  expect_match(html, "alert-success", fixed = TRUE)
-  expect_match(html, "Join running...", fixed = TRUE)
-  expect_match(html, "progress-bar-animated", fixed = TRUE)
+  expect_false(grepl("alert-success", html, fixed = TRUE))
+  expect_false(grepl("running...", html, fixed = TRUE))
+  expect_false(grepl("progress-bar", html, fixed = TRUE))
   expect_match(html, 'id="task_phase_list"', fixed = TRUE)
   expect_match(html, 'id="cancel_task_btn"', fixed = TRUE)
   # OK ships hidden and is revealed by the browser when the task finishes, so
