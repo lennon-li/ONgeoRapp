@@ -39,20 +39,14 @@ source_choices <- function() {
   stats::setNames(sources$source_id, source_choice_labels(sources))
 }
 
-# Maps a source's registry geography_type to the display-label type suffix.
-source_type_suffix <- function(geography_type) {
-  switch(geography_type,
-    boundary = "Polygon",
-    facility = "Point",
-    raster   = "Raster",
-    geography_type)
-}
-
-# Appends "(Type)" to each source's display name, e.g.
-# "MOH Service Location (Point)". Used by both the flat and grouped choice
-# builders so labels stay consistent everywhere a source picker appears.
+# Source display labels are the registry name as-is. Geometry type is already
+# conveyed by the picker's optgroup header (Polygons/Rasters/Points) and the
+# colored geometry badge (source_geom_label()), so a "(Type)" suffix here was
+# a third, redundant signal - and stacked awkwardly with names that already
+# end in a parenthetical, e.g. "MOH Public Health Unit Boundary (post-2025,
+# 29 PHUs) (Polygon)".
 source_choice_labels <- function(sources) {
-  sprintf("%s (%s)", sources$name, vapply(sources$geography_type, source_type_suffix, character(1)))
+  sources$name
 }
 
 # Grouped-choices form for use with selectInput's optgroup support:
@@ -858,6 +852,31 @@ task_progress_js <- tags$script(HTML("
 })();
 "))
 
+# The Data tab is always present now (it used to be hidden entirely via
+# bslib::nav_hide()/nav_show(), which meant a first-time user could not see
+# it existed until after a successful join). Bootstrap's own
+# `.nav-link.disabled` handles the greyed-out, unclickable look and sets
+# `pointer-events: none` for us; this just toggles that class on the "Data"
+# link. Matches the ongeor-progress pattern: a plain custom message, not a
+# reactive chain, because the sender lives inside the same ExtendedTask
+# result-handling observer as other terminal-state pushes and a chained
+# observer reading a reactiveVal there would not re-flush (see
+# extendedtask-observer-reflush-trap.md).
+data_tab_js <- tags$script(HTML("
+(function(){
+  Shiny.addCustomMessageHandler('ongeor-data-tab', function(disabled){
+    var links = document.querySelectorAll('#main_tabs .nav-link');
+    links.forEach(function(a){
+      if ((a.textContent || '').trim() === 'Data') {
+        a.classList.toggle('disabled', !!disabled);
+        if (disabled) { a.setAttribute('aria-disabled', 'true'); }
+        else { a.removeAttribute('aria-disabled'); }
+      }
+    });
+  });
+})();
+"))
+
 # --- Phase reporting across the future boundary ---------------------------
 # Fetch and join run inside a future in a separate R process, which cannot
 # write to a reactiveVal. The task writes its current phase to a plain file
@@ -1183,7 +1202,7 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
 ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
-  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js),
+  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js, data_tab_js),
   # The logo lives at the top of the sidebar, not in a page header. The app is
   # a single-purpose linking interface, so the layout can fill the page
   # directly and a header bar would only cost the map vertical space.
@@ -1268,9 +1287,11 @@ ui <- bslib::page_fillable(
 
 server <- function(input, output, session) {
 
-  # Keep results unavailable until a join has actually completed. nav_hide()
-  # and nav_show() are bslib's supported wrappers around Shiny tab updates.
-  bslib::nav_hide("main_tabs", "data", session = session)
+  # The Data tab stays visible but greyed out (see data_tab_js) until a join
+  # has actually completed, so a first-time user can see it exists rather
+  # than wondering where results will show up. Sent directly, not through a
+  # reactive chain - see data_tab_js's comment.
+  session$sendCustomMessage("ongeor-data-tab", TRUE)
 
   # --- Async tasks (ExtendedTask; requires shiny >= 1.8.0) -----------
 
@@ -1578,6 +1599,7 @@ server <- function(input, output, session) {
       cw_result$base_sf <- NULL
       cw_result$overlay_sf <- NULL
       cw_result$previewed <- NULL
+      session$sendCustomMessage("ongeor-data-tab", TRUE)
     }
   }, ignoreInit = TRUE)
 
@@ -1899,6 +1921,7 @@ server <- function(input, output, session) {
     cw_result$pairs <- NULL
     cw_result$base_sf <- NULL
     cw_result$overlay_sf <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     cw_result$previewed <- NULL
   }, ignoreInit = TRUE)
 
@@ -1993,11 +2016,12 @@ server <- function(input, output, session) {
     cw_result$base_sf <- unpack_spatial(result$base_sf)
     cw_result$overlay_sf <- unpack_spatial(result$overlay_sf)
     # A fresh preview invalidates any stale link results - the Data tab
-    # goes empty and the crosswalk/linked-csv and reproduce.R downloads
-    # disable until Link is run again.
+    # goes back to greyed out and the crosswalk/linked-csv and reproduce.R
+    # downloads disable until Link is run again.
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     # Records exactly what was previewed, so the Join button's renderUI
     # can require the current picker values to match before enabling -
     # changing either picker after a preview re-greys Link. Only set on
@@ -2073,6 +2097,7 @@ server <- function(input, output, session) {
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     postal_layer <- NULL
     if (identical(input$overlay_source, "postal_upload")) {
       pr <- postal_result()
@@ -2123,7 +2148,7 @@ server <- function(input, output, session) {
     cw_result$overlay_sf  <- unpack_spatial(result$overlay_sf)
     link_state("completed")
     link_state_detail("Results and downloads are ready.")
-    bslib::nav_show("main_tabs", "data", session = session)
+    session$sendCustomMessage("ongeor-data-tab", FALSE)
   }, ignoreInit = TRUE)
 
   # The map renders at app load - before any preview - carrying
@@ -2282,7 +2307,20 @@ server <- function(input, output, session) {
     filename = function() "map.html",
     content = function(file) {
       req(cw_result$base_sf, cw_result$overlay_sf)
-      htmlwidgets::saveWidget(link_map(), file, selfcontained = TRUE)
+      # Coordinate JSON, not library overhead, dominates map.html: a live
+      # full-resolution PHU boundary alone measured 16.5 of 17.8 MB, and
+      # jsonlite's default digits carries far more precision than a display
+      # map needs. 6 decimal degrees is ~11cm - nowhere near where anyone
+      # could see a difference on screen - and cuts that layer to ~11.4 MB
+      # (measured). Set per-widget via TOJSON_ARGS, not the global
+      # htmlwidgets option, so this does not also round the live interactive
+      # map. Vertex COUNT is the remaining cost and would need geometry
+      # simplification to cut further - that changes what ships, not just
+      # its precision, so it stays a deliberate call rather than folded in
+      # here.
+      map_obj <- link_map()
+      attr(map_obj$x, "TOJSON_ARGS") <- list(digits = 6)
+      htmlwidgets::saveWidget(map_obj, file, selfcontained = TRUE)
     }
   )
   output$dl_cw_script <- downloadHandler(
@@ -2329,12 +2367,13 @@ server <- function(input, output, session) {
           ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs) &&
             !identical(input$overlay_source, "postal_upload"))
       )),
-      # The exported map carries the furniture layers too; say so here so
-      # the addition is not silent.
+      # The exported map carries the furniture layer too; say so here so
+      # the addition is not silent. HIVE is not furniture (see
+      # furniture_layers()) - only PHU_simple is.
       tags$p(class = "text-muted",
-        paste("map.html also includes the bundled PHU_simple and HIVE",
-          "reference layers (each hidden only while its full-resolution",
-          "source counterpart is selected)."))
+        paste("map.html also includes the bundled PHU_simple reference",
+          "layer (hidden only while a full-resolution PHU boundary is",
+          "selected)."))
     )
   })
 
