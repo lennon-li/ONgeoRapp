@@ -1092,6 +1092,68 @@ furniture_layers <- function(selected_ids = character()) {
   layers
 }
 
+# Simplifies polygon geometry for map.html EXPORT ONLY. Never called on
+# cw_result itself - the live interactive map, the Data tab, and the
+# Table/Shape downloads all read cw_result directly and are unaffected.
+# Point and raster layers pass through unchanged; only POLYGON/MULTIPOLYGON
+# sf layers are touched.
+#
+# Recipe matches ONgeoR's own data-raw/phu_simple.R build (which produces the
+# bundled PHU_simple furniture layer) - it is not a new invention, and it
+# lands on the same ~20.5k-vertex result that build already ships and calls
+# "visually indistinguishable" at this scale. Two things both turned out to
+# be load-bearing, each verified in isolation:
+#  - A live full-resolution PHU boundary carries 37,061 polygon parts
+#    (Ontario's lakes and islands), and st_simplify(preserveTopology = TRUE)
+#    enforces a minimum ring per PART, so part count - not vertex density -
+#    sets a floor. Small parts have to be dropped BEFORE simplifying, or nothing
+#    shrinks regardless of tolerance.
+#  - st_simplify barely simplifies lon/lat geometry directly: run on
+#    already-part-dropped geometry in the SOURCE (geographic) CRS, tolerances
+#    from 50 m to 1 km equivalent moved vertex count by 4 out of ~300k. Only
+#    reprojecting to a metric CRS first (matching phu_simple.R's own EPSG:3161
+#    choice) makes the tolerance argument mean anything.
+# Measured on the live PHU boundary layer with the defaults below:
+# 607,848 -> 20,650 vertices (3.4% of original), area deviation 0.056%.
+simplify_for_export <- function(x, tol_m = 250, min_part_area_m2 = 1e6) {
+  if (!inherits(x, "sf")) return(x)
+  geom_type <- unique(as.character(sf::st_geometry_type(x, by_geometry = FALSE)))
+  if (!grepl("POLYGON", geom_type)) return(x)
+
+  source_crs <- sf::st_crs(x)
+  # Ontario MNR Lambert (metres) - ONgeoR's own choice for this exact
+  # operation (data-raw/phu_simple.R) and appropriate for its Ontario-only
+  # data, but this is a display-simplification default, not a general-purpose
+  # equal-area projection for arbitrary extents.
+  x_m <- sf::st_transform(x, 3161)
+
+  parts <- suppressWarnings(sf::st_cast(sf::st_cast(x_m, "MULTIPOLYGON"), "POLYGON"))
+  row_index <- rep(seq_len(nrow(x_m)), vapply(sf::st_geometry(x_m), length, integer(1)))
+  keep <- as.numeric(sf::st_area(parts)) >= min_part_area_m2
+
+  geom <- sf::st_sfc(lapply(seq_len(nrow(x_m)), function(i) {
+    sel <- which(row_index == i & keep)
+    # Never let a feature vanish: if every part is below threshold, keep its
+    # largest one so every row survives.
+    if (length(sel) == 0) {
+      row_parts <- which(row_index == i)
+      sel <- row_parts[which.max(as.numeric(sf::st_area(parts[row_parts, ])))]
+    }
+    sf::st_cast(sf::st_combine(sf::st_geometry(parts)[sel]), "MULTIPOLYGON")[[1]]
+  }), crs = sf::st_crs(x_m))
+
+  x_m <- sf::st_set_geometry(x_m, geom)
+  x_m <- sf::st_simplify(x_m, dTolerance = tol_m, preserveTopology = TRUE)
+  # Combining and simplifying parts can produce rings that pass s2 (used for
+  # geographic-CRS validity checks) but fail GEOS's stricter planar rules -
+  # the same class of defect data-raw/hive_make_valid.R exists to fix.
+  # Repair here, in the planar CRS, before transforming back.
+  x_m <- sf::st_make_valid(x_m)
+
+  simplified <- sf::st_transform(x_m, source_crs)
+  sf::st_cast(simplified, "MULTIPOLYGON")
+}
+
 add_furniture_layer <- function(map, layer, group) {
   leaflet::addPolygons(
     map,
@@ -2157,14 +2219,19 @@ server <- function(input, output, session) {
   # furniture in the overlay list. The view is pinned to the Ontario-wide
   # extent of the bundled PHU outline on every render and is never re-fit
   # to the selected sources' extent.
-  link_map <- reactive({
+  #
+  # Extracted from the reactive as a plain function so the map.html
+  # downloadHandler can build a second copy from simplify_for_export()'d
+  # geometry without duplicating this assembly logic. The live map below
+  # calls it unsimplified; nothing about the live path changed.
+  build_link_map <- function(base_sf, overlay_sf, previewed, pairs) {
     layers <- list()
     styles <- list()
-    if (!is.null(cw_result$base_sf) && !is.null(cw_result$overlay_sf)) {
-      layers <- list("Source layer" = cw_result$base_sf, "Target layer" = cw_result$overlay_sf)
+    if (!is.null(base_sf) && !is.null(overlay_sf)) {
+      layers <- list("Source layer" = base_sf, "Target layer" = overlay_sf)
       styles <- list(
-        "Source layer" = read_layer_style(input, "base", layer_geom(cw_result$base_sf), accent = "#2a78d6"),
-        "Target layer" = read_layer_style(input, "overlay", layer_geom(cw_result$overlay_sf), accent = "#1baf7a")
+        "Source layer" = read_layer_style(input, "base", layer_geom(base_sf), accent = "#2a78d6"),
+        "Target layer" = read_layer_style(input, "overlay", layer_geom(overlay_sf), accent = "#1baf7a")
       )
     }
     # Suppress PHU_simple only when phu_boundaries is actually DRAWN, not
@@ -2172,19 +2239,19 @@ server <- function(input, output, session) {
     # layer, so keying suppression off the selection hid the furniture on
     # every fresh load - the exact case it exists for. Nothing is drawn from
     # a selection until a preview succeeds.
-    drawn_ids <- if (length(layers)) cw_result$previewed else character(0)
+    drawn_ids <- if (length(layers)) previewed else character(0)
     furniture <- furniture_layers(drawn_ids)
     # A nearest (point-to-point) result draws connector lines between matched
     # points; add_nearest_connectors() also owns the layers control in that
     # case, so render_styled_map() skips its own (exactly one control either way).
-    nearest_run <- is_nearest_result(cw_result$pairs)
+    nearest_run <- is_nearest_result(pairs)
     map <- render_styled_map(
       layers, styles,
       add_control = !nearest_run,
       furniture = furniture
     )
     if (nearest_run) {
-      connectors <- nearest_connectors(cw_result$base_sf, cw_result$overlay_sf, cw_result$pairs)
+      connectors <- nearest_connectors(base_sf, overlay_sf, pairs)
       conn_style <- list(color = "#52514e", weight = 1, opacity = 0.7)
       map <- add_nearest_connectors(map, layers, connectors, conn_style, furniture = furniture)
     }
@@ -2196,12 +2263,15 @@ server <- function(input, output, session) {
     zoom_inset <- 0.12
     inset_x <- (ontario[["xmax"]] - ontario[["xmin"]]) * zoom_inset / 2
     inset_y <- (ontario[["ymax"]] - ontario[["ymin"]]) * zoom_inset / 2
-    map <- leaflet::fitBounds(
+    leaflet::fitBounds(
       map,
       lng1 = ontario[["xmin"]] + inset_x, lat1 = ontario[["ymin"]] + inset_y,
       lng2 = ontario[["xmax"]] - inset_x, lat2 = ontario[["ymax"]] - inset_y
     )
-    map
+  }
+
+  link_map <- reactive({
+    build_link_map(cw_result$base_sf, cw_result$overlay_sf, cw_result$previewed, cw_result$pairs)
   })
 
   # The widget reports back when it has finished drawing. Leaflet renders the
@@ -2308,17 +2378,27 @@ server <- function(input, output, session) {
     content = function(file) {
       req(cw_result$base_sf, cw_result$overlay_sf)
       # Coordinate JSON, not library overhead, dominates map.html: a live
-      # full-resolution PHU boundary alone measured 16.5 of 17.8 MB, and
-      # jsonlite's default digits carries far more precision than a display
-      # map needs. 6 decimal degrees is ~11cm - nowhere near where anyone
-      # could see a difference on screen - and cuts that layer to ~11.4 MB
-      # (measured). Set per-widget via TOJSON_ARGS, not the global
-      # htmlwidgets option, so this does not also round the live interactive
-      # map. Vertex COUNT is the remaining cost and would need geometry
-      # simplification to cut further - that changes what ships, not just
-      # its precision, so it stays a deliberate call rather than folded in
-      # here.
-      map_obj <- link_map()
+      # full-resolution PHU boundary alone measured 16.5 of 17.8 MB. Two
+      # independent cuts apply, both export-only - cw_result, the live map,
+      # and the Data/Table/Shape outputs are never touched:
+      #  1. simplify_for_export() - drops sub-1km2 polygon parts (lakes and
+      #     islands) and simplifies in a projected CRS, the same recipe
+      #     ONgeoR itself uses to build the bundled PHU_simple layer. Cut a
+      #     607,848-vertex PHU layer to 20,650 (3.4% of original), area
+      #     deviation 0.056%. Built through build_link_map() - the same
+      #     assembly the live map uses - so this map is structurally
+      #     identical to the live one, just fed simplified geometry.
+      #  2. TOJSON_ARGS digits = 6 (~11cm precision) on the widget object,
+      #     set per-widget rather than via the global htmlwidgets option so
+      #     the live interactive map keeps full precision.
+      # Real end-to-end download after both, default source/target pair
+      # (phu_boundaries + moh_service_locations): 1.4 MB, down from 17.8 MB.
+      map_obj <- build_link_map(
+        simplify_for_export(cw_result$base_sf),
+        simplify_for_export(cw_result$overlay_sf),
+        cw_result$previewed,
+        cw_result$pairs
+      )
       attr(map_obj$x, "TOJSON_ARGS") <- list(digits = 6)
       htmlwidgets::saveWidget(map_obj, file, selfcontained = TRUE)
     }
@@ -2367,13 +2447,14 @@ server <- function(input, output, session) {
           ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs) &&
             !identical(input$overlay_source, "postal_upload"))
       )),
-      # The exported map carries the furniture layer too; say so here so
-      # the addition is not silent. HIVE is not furniture (see
-      # furniture_layers()) - only PHU_simple is.
+      # The exported map carries the furniture layer too, and its polygons
+      # are simplified for file size; say so here so neither is silent.
+      # HIVE is not furniture (see furniture_layers()) - only PHU_simple is.
       tags$p(class = "text-muted",
         paste("map.html also includes the bundled PHU_simple reference",
           "layer (hidden only while a full-resolution PHU boundary is",
-          "selected)."))
+          "selected). Polygon boundaries are simplified for file size; the",
+          "Table and Shape downloads use full-resolution geometry."))
     )
   })
 
