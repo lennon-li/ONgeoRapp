@@ -877,6 +877,38 @@ data_tab_js <- tags$script(HTML("
 })();
 "))
 
+# Restyles already-drawn layers in place so colour/opacity control changes do
+# not rebuild the whole map (~38 s for the full PHU layer). The server sends
+# {group: {style}} keyed by the layer-group names build_link_map() draws with;
+# only the two slot groups are ever addressed (the "PHU_simple" furniture
+# group keeps its fixed style). A dropped message is safe: any subsequent
+# rebuild redraws from the current input values, so nothing can go stale.
+# HTMLWidgets.find('#cw_map') does NOT return the Leaflet map for a
+# Shiny-rendered widget: it returns the binding's wrapper, whose own keys are
+# getMap/renderValue/doRenderValue/resize, and whose `layerManager` is
+# undefined. Verified in a headless browser - reading `.layerManager` straight
+# off the wrapper made this handler return at its own guard on every message,
+# so colour changes silently did nothing while the rebuild that used to apply
+# them had already been removed. The map (and its layerManager) is reached
+# through getMap(). leaflet's non-Shiny factory path does return the map
+# directly, which is what makes the wrong form look right in the sources.
+restyle_js <- tags$script(HTML("
+(function(){
+  Shiny.addCustomMessageHandler('ongeor-restyle', function(styles){
+    var widget = HTMLWidgets.find('#cw_map');
+    var map = (widget && typeof widget.getMap === 'function') ? widget.getMap() : null;
+    if (!map || !map.layerManager) return;
+    Object.keys(styles).forEach(function(group){
+      var grp = map.layerManager.getLayerGroup(group, false);
+      if (!grp) return;
+      grp.eachLayer(function(layer){
+        if (typeof layer.setStyle === 'function') layer.setStyle(styles[group]);
+      });
+    });
+  });
+})();
+"))
+
 # --- Phase reporting across the future boundary ---------------------------
 # Fetch and join run inside a future in a separate R process, which cannot
 # write to a reactiveVal. The task writes its current phase to a plain file
@@ -1095,8 +1127,9 @@ furniture_layers <- function(selected_ids = character()) {
 # Simplifies polygon geometry for map.html EXPORT ONLY. Never called on
 # cw_result itself - the live interactive map, the Data tab, and the
 # Table/Shape downloads all read cw_result directly and are unaffected.
-# Point and raster layers pass through unchanged; only POLYGON/MULTIPOLYGON
-# sf layers are touched.
+# Point and line layers pass through unchanged; only sf layers whose every
+# geometry is POLYGON or MULTIPOLYGON (including mixed POLYGON+MULTIPOLYGON
+# layers) are touched.
 #
 # Recipe matches ONgeoR's own data-raw/phu_simple.R build (which produces the
 # bundled PHU_simple furniture layer) - it is not a new invention, and it
@@ -1117,8 +1150,11 @@ furniture_layers <- function(selected_ids = character()) {
 # 607,848 -> 20,650 vertices (3.4% of original), area deviation 0.056%.
 simplify_for_export <- function(x, tol_m = 250, min_part_area_m2 = 1e6) {
   if (!inherits(x, "sf")) return(x)
-  geom_type <- unique(as.character(sf::st_geometry_type(x, by_geometry = FALSE)))
-  if (!grepl("POLYGON", geom_type)) return(x)
+  # Check per-geometry types: a mixed POLYGON+MULTIPOLYGON layer reports the
+  # collection type "GEOMETRY", which a layer-level check would reject and
+  # then silently export unsimplified.
+  geom_types <- unique(as.character(sf::st_geometry_type(x)))
+  if (!all(geom_types %in% c("POLYGON", "MULTIPOLYGON"))) return(x)
 
   source_crs <- sf::st_crs(x)
   # Ontario MNR Lambert (metres) - ONgeoR's own choice for this exact
@@ -1127,8 +1163,14 @@ simplify_for_export <- function(x, tol_m = 250, min_part_area_m2 = 1e6) {
   # equal-area projection for arbitrary extents.
   x_m <- sf::st_transform(x, 3161)
 
-  parts <- suppressWarnings(sf::st_cast(sf::st_cast(x_m, "MULTIPOLYGON"), "POLYGON"))
-  row_index <- rep(seq_len(nrow(x_m)), vapply(sf::st_geometry(x_m), length, integer(1)))
+  mp <- suppressWarnings(sf::st_cast(x_m, "MULTIPOLYGON"))
+  parts <- suppressWarnings(sf::st_cast(mp, "POLYGON"))
+  # The part counts must come from the cast object itself, not from x_m:
+  # length() on a POLYGON sfg returns the RING count (outer ring plus holes),
+  # which desyncs row_index from parts and corrupts the keep filter below
+  # for any layer with holes. length() on the MULTIPOLYGON cast is the part
+  # count, so sum() of these counts equals nrow(parts) for every input.
+  row_index <- rep(seq_len(nrow(mp)), vapply(sf::st_geometry(mp), length, integer(1)))
   keep <- as.numeric(sf::st_area(parts)) >= min_part_area_m2
 
   geom <- sf::st_sfc(lapply(seq_len(nrow(x_m)), function(i) {
@@ -1264,7 +1306,7 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
 ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
-  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js, data_tab_js),
+  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js, data_tab_js, restyle_js),
   # The logo lives at the top of the sidebar, not in a page header. The app is
   # a single-purpose linking interface, so the layout can fill the page
   # directly and a header bar would only cost the map vertical space.
@@ -2270,8 +2312,71 @@ server <- function(input, output, session) {
     )
   }
 
+  # The map rebuild is deliberately blind to the restylable style inputs
+  # (line/fill colour, fill opacity, point colour): the ongeor-restyle
+  # observer below applies those to already-drawn layers in the browser, so
+  # nudging a colour slider no longer costs a full rebuild. Geometry-bearing
+  # state stays a real (un-isolated) dependency so preview/join results keep
+  # updating the map; only the rebuild-class style inputs are touched
+  # explicitly because they cannot be restyled in place (circle radius and
+  # point shape change geometry, addRasterImage bakes a bitmap). isolate()
+  # wraps ONLY the build call - wrapping the cw_result reads above would stop
+  # the map updating on preview/join. The download handler calls
+  # build_link_map() outside reactive context and is unaffected.
   link_map <- reactive({
-    build_link_map(cw_result$base_sf, cw_result$overlay_sf, cw_result$previewed, cw_result$pairs)
+    base_sf    <- cw_result$base_sf
+    overlay_sf <- cw_result$overlay_sf
+    previewed  <- cw_result$previewed
+    pairs      <- cw_result$pairs
+    for (nm in c("base_point_size", "base_point_shape",
+                 "base_raster_palette", "base_raster_opacity",
+                 "overlay_point_size", "overlay_point_shape",
+                 "overlay_raster_palette", "overlay_raster_opacity")) {
+      input[[nm]]
+    }
+    isolate(build_link_map(base_sf, overlay_sf, previewed, pairs))
+  })
+
+  # Pushes colour/opacity changes onto already-drawn layers without a rebuild.
+  # Style is keyed per group and per geometry kind via the same layer_geom()
+  # token build_link_map() uses, so the fields sent always match what was
+  # drawn. Slots without a loaded layer send nothing.
+  #
+  # Values come from read_layer_style() rather than raw input reads, for the
+  # reason that function documents: its fields fall back to defaults when a
+  # control has not been rendered yet (a picker changed after a build re-renders
+  # the style UI, and the inputs are briefly absent). Reading input directly
+  # here sent {"color":null,"fillColor":null,"fillOpacity":null} in that window;
+  # Leaflet's setStyle merges those into the path options, where an invalid
+  # fill-opacity resolves to fully opaque - a black flash on the polygons.
+  # Going through read_layer_style() also guarantees a restyle and a rebuild
+  # agree, since the rebuild reads its style the same way, and keeps the input
+  # field names in exactly one place.
+  restyle_payload <- function(slot, layer, accent) {
+    if (is.null(layer)) return(NULL)
+    kind <- layer_geom(layer)
+    style <- read_layer_style(input, slot, kind, accent = accent)
+    if (identical(kind, "polygon")) {
+      list(color = style$line_color, fillColor = style$fill_color,
+        fillOpacity = style$fill_opacity)
+    } else if (identical(kind, "point")) {
+      # Circle markers are drawn with stroke = FALSE so `color` is inert there;
+      # square points are Rectangles, which do paint their border.
+      list(color = style$point_color, fillColor = style$point_color)
+    } else {
+      # Raster: addRasterImage() bakes a bitmap, so palette/opacity changes stay
+      # on the rebuild path and there is nothing to restyle in place.
+      NULL
+    }
+  }
+
+  observe({
+    styles <- list()
+    base_style <- restyle_payload("base", cw_result$base_sf, "#2a78d6")
+    if (!is.null(base_style)) styles[["Source layer"]] <- base_style
+    overlay_style <- restyle_payload("overlay", cw_result$overlay_sf, "#1baf7a")
+    if (!is.null(overlay_style)) styles[["Target layer"]] <- overlay_style
+    if (length(styles)) session$sendCustomMessage("ongeor-restyle", styles)
   })
 
   # The widget reports back when it has finished drawing. Leaflet renders the
