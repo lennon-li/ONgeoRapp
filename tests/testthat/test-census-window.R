@@ -103,3 +103,60 @@ test_that("the bbox reaches retrieve_census only when the window is on", {
     expect_false(any(grepl("current map view only", preview_progress_log(), fixed = TRUE)))
   })
 })
+
+test_that("Join reuses the bbox frozen by Preview", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  layers <- shiny_fixture_layers()
+  registry <- tibble::tibble(
+    source_id = c("census_da_2021", "overlay_point"),
+    name = c("DA", "Overlay point"),
+    geography_type = c("boundary", "facility"),
+    feature_count = c(20465L, 10L)
+  )
+  seen <- new.env(parent = emptyenv())
+  seen$census_bboxes <- list()
+
+  testthat::local_mocked_bindings(
+    list_sources = function() registry,
+    get_source = function(source_id) shiny_fixture_metadata(
+      if (source_id == "census_da_2021") "base_polygon" else "overlay_point"
+    ),
+    retrieve_source = function(source_id, refresh = FALSE, ...) {
+      layers[[if (source_id == "census_da_2021") "base_polygon" else "overlay_point"]]
+    },
+    retrieve_census = function(source_id, bbox = NULL, ...) {
+      seen$census_bboxes[[length(seen$census_bboxes) + 1L]] <- bbox
+      layers[["base_polygon"]]
+    },
+    build_crosswalk = function(from, to, ...) {
+      tibble::tibble(from_id = 1:2, to_id = c("P1", "P2"))
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+  preview_bbox <- c(-76, 45.2, -75.4, 45.6)
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "census_da_2021",
+      overlay_source = "overlay_point",
+      cw_map_bounds = list(west = -76, south = 45.2, east = -75.4, north = 45.6),
+      limit_to_view = TRUE,
+      preview_btn = 1
+    )
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+    expect_equal(previewed_bbox(), preview_bbox)
+
+    session$setInputs(
+      cw_map_bounds = list(west = -80, south = 43, east = -79, north = 44),
+      confirm_join_btn = 1
+    )
+    expect_identical(wait_for_extended_task(build_task, session), "success")
+    expect_length(seen$census_bboxes, 2L)
+    expect_equal(seen$census_bboxes[[1]], preview_bbox)
+    expect_equal(seen$census_bboxes[[2]], preview_bbox)
+  })
+})

@@ -992,6 +992,89 @@ test_that("unmatched postal codes are reported in status text", {
   })
 })
 
+test_that("postal resolver failures show their cause instead of unmatched counts", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal_points = function(x, as_sf = FALSE) {
+      stop("Postal resolver unavailable")
+    },
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(postal = c("K1A 0B1", "M5V 2T6"), stringsAsFactors = FALSE),
+      csv_file, row.names = FALSE
+    )
+    session$setInputs(postal_file = list(name = "test.csv", datapath = csv_file))
+    session$flushReact()
+    session$setInputs(postal_column = "postal")
+    session$flushReact()
+
+    pr <- postal_result()
+    expect_false(is.null(pr$error))
+    expect_match(pr$error$message, "Postal resolver unavailable", fixed = TRUE)
+    status_html <- rendered_html(output$postal_status_ui)
+    expect_match(status_html, "Postal resolver unavailable", fixed = TRUE)
+    expect_false(grepl("0 placed", status_html, fixed = TRUE))
+  })
+})
+
+test_that("partial postal placement remains a successful unmatched result", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+
+  postal_sf <- sf::st_as_sf(
+    tibble::tibble(
+      postal_code = "K1A 0B1",
+      point_source = "geonames",
+      lon = -75.7,
+      lat = 45.4
+    ),
+    coords = c("lon", "lat"), crs = 4326
+  )
+  testthat::local_mocked_bindings(
+    list_sources = shiny_fixture_registry,
+    get_source = shiny_fixture_metadata,
+    resolve_postal_points = function(x, as_sf = FALSE) postal_sf,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+
+  shiny::testServer(server, {
+    session$setInputs(
+      base_layer = "base_polygon",
+      overlay_source = "postal_upload"
+    )
+    csv_file <- withr::local_tempfile(fileext = ".csv")
+    utils::write.csv(
+      data.frame(postal = c("K1A 0B1", "INVALID"), stringsAsFactors = FALSE),
+      csv_file, row.names = FALSE
+    )
+    session$setInputs(postal_file = list(name = "test.csv", datapath = csv_file))
+    session$flushReact()
+    session$setInputs(postal_column = "postal")
+    session$flushReact()
+
+    pr <- postal_result()
+    expect_null(pr$error)
+    expect_equal(pr$n_placed, 1L)
+    expect_equal(pr$n_unmatched, 1L)
+    status_html <- rendered_html(output$postal_status_ui)
+    expect_match(status_html, "2 input rows, 1 placed, 1 unmatched.", fixed = TRUE)
+  })
+})
+
 test_that("unreadable file yields a status message and no crash", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")

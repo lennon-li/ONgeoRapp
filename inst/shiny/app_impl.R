@@ -1631,6 +1631,7 @@ server <- function(input, output, session) {
     base_sf = NULL, overlay_sf = NULL, previewed = NULL)
   preview_generation <- reactiveVal(0L)
   preview_active_generation <- reactiveVal(NULL)
+  previewed_bbox <- reactiveVal(NULL)
   link_generation <- reactiveVal(0L)
   link_active_generation <- reactiveVal(NULL)
   link_active_inputs <- reactiveVal(NULL)
@@ -1671,12 +1672,16 @@ server <- function(input, output, session) {
     if (!col %in% names(fr$df)) return(NULL)
     codes <- as.character(fr$df[[col]])
     n_input <- length(codes)
+    postal_error <- NULL
     sf_layer <- tryCatch(
       withCallingHandlers(
         ONgeoR::resolve_postal_points(codes, as_sf = TRUE),
         warning = function(w) invokeRestart("muffleWarning")
       ),
-      error = function(e) NULL
+      error = function(e) {
+        postal_error <<- e
+        NULL
+      }
     )
     n_placed <- if (!is.null(sf_layer)) nrow(sf_layer) else 0L
     n_geonames <- if (!is.null(sf_layer) && "point_source" %in% names(sf_layer)) {
@@ -1689,7 +1694,8 @@ server <- function(input, output, session) {
       n_input = n_input,
       n_placed = n_placed,
       n_unmatched = n_input - n_placed,
-      n_geonames = n_geonames
+      n_geonames = n_geonames,
+      error = if (is.null(postal_error)) NULL else describe_retrieval_failure(postal_error)
     )
   })
 
@@ -1703,6 +1709,7 @@ server <- function(input, output, session) {
       cw_result$base_sf <- NULL
       cw_result$overlay_sf <- NULL
       cw_result$previewed <- NULL
+      previewed_bbox(NULL)
       session$sendCustomMessage("ongeor-data-tab", TRUE)
     }
   }, ignoreInit = TRUE)
@@ -1746,6 +1753,7 @@ server <- function(input, output, session) {
     if (!is.null(fr$error)) return(NULL)
     pr <- postal_result()
     req(pr)
+    if (!is.null(pr$error)) return(retrieval_failure_notification(pr$error))
     status <- tags$p(class = "text-muted",
       sprintf("%s input rows, %s placed, %s unmatched.",
         format(pr$n_input, big.mark = ","),
@@ -2027,6 +2035,7 @@ server <- function(input, output, session) {
     cw_result$overlay_sf <- NULL
     session$sendCustomMessage("ongeor-data-tab", TRUE)
     cw_result$previewed <- NULL
+    previewed_bbox(NULL)
   }, ignoreInit = TRUE)
 
   # Link is gated on having previewed the CURRENT pair: enabled only when a
@@ -2072,8 +2081,10 @@ server <- function(input, output, session) {
     preview_progress_log(character())
     preview_state("running")
     preview_state_detail("Starting.")
+    bbox <- requested_bbox()
+    previewed_bbox(bbox)
     preview_task$invoke(input$base_layer, input$overlay_source, generation,
-      postal_layer, path, requested_bbox())
+      postal_layer, path, bbox)
   })
 
   observeEvent(preview_task$status(), {
@@ -2214,7 +2225,7 @@ server <- function(input, output, session) {
       generation,
       postal_layer,
       isolate(link_progress_path()),
-      requested_bbox()
+      isolate(previewed_bbox())
     )
   })
 
