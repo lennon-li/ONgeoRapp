@@ -725,6 +725,18 @@ task_status_ui <- function(state, detail = NULL, phases = character()) {
   )
 }
 
+# What the user is told when a run is cancelled. Cancellation is COOPERATIVE:
+# the worker stops at its next phase boundary, so a download already in flight
+# runs to the end (see new_cancel_path()). Saying only "Cancelled" while a large
+# first-time fetch keeps going is the same "the state says X but X has not
+# happened" dishonesty that this dialog exists to avoid, so the wait is named
+# and the user is given the one guaranteed escape: restart the app.
+cancel_wait_note <- paste(
+  "The step already running cannot be interrupted, so this can take a while -",
+  "a large first-time download runs to the end. Nothing will be added to the",
+  "map. If you would rather not wait, close and restart the app."
+)
+
 # The progress dialog SHELL. Shown exactly once per run and never re-rendered
 # by Shiny.
 #
@@ -787,8 +799,16 @@ task_progress_js <- tags$script(HTML("
     var html = '';
     for (var i = 0; i < m.phases.length; i++) {
       var label = esc(m.phases[i]).replace(/\\s*\\.\\.\\.$/, '');
-      var done = m.done || (i !== m.phases.length - 1);
-      if (done) {
+      var last = (i === m.phases.length - 1);
+      // A cancelled run must NOT show a check against the step that was still
+      // running - the worker stops at its next phase boundary, so that step is
+      // unfinished, not done.
+      var done = last ? (m.done && !m.stopped) : true;
+      if (last && m.stopped) {
+        html += '<li class=\"task-phase task-phase-stopped mb-1\">' +
+                '<span class=\"task-phase-check text-warning me-2\">\\u23f8</span>' +
+                label + ' &mdash; <span class=\"text-muted\">still finishing</span></li>';
+      } else if (done) {
         html += '<li class=\"task-phase task-phase-done mb-1\">' +
                 '<span class=\"task-phase-check text-success me-2\">\\u2713</span>' +
                 label + ' &mdash; <span class=\"text-muted\">done</span></li>';
@@ -801,18 +821,24 @@ task_progress_js <- tags$script(HTML("
     if (m.done && !m.ok && m.title) {
       html += '<li class=\"task-phase text-danger mt-2\"><strong>' + esc(m.title) + '</strong></li>';
     }
+    if (m.note) {
+      html += '<li class=\"task-phase task-phase-note text-muted small mt-1\">' + esc(m.note) + '</li>';
+    }
     list.innerHTML = html;
     var hint = document.getElementById('task_hint');
     if (hint) hint.innerHTML = m.done ? '' : esc(m.hint || '');
     var bar = document.getElementById('task_activity');
-    if (bar) bar.style.display = m.done ? 'none' : '';
+    // Still-finishing work keeps the bar and the clock going: they are the only
+    // honest signal that the app has not gone quiet on the user.
+    var running = !m.done || m.stopped;
+    if (bar) bar.style.display = running ? '' : 'none';
     var cancel = document.getElementById('cancel_task_btn');
     var okb = document.getElementById('progress_ok_btn');
     if (m.done) {
       if (cancel) cancel.classList.add('d-none');
       if (okb) okb.classList.remove('d-none');
     }
-    startClock(m.done);
+    startClock(!running);
     return true;
   }
 
@@ -1954,12 +1980,19 @@ server <- function(input, output, session) {
   dialog_hint <- new.env(parent = emptyenv())
   dialog_hint$text <- ""
 
-  push_progress <- function(phases, done, ok = TRUE, title = NULL) {
+  # `stopped` means "the run is over as far as the UI is concerned, but a
+  # background phase may still be finishing" - it is what keeps the dialog from
+  # ticking a step that is still running. `note` is the plain-language
+  # explanation shown underneath.
+  push_progress <- function(phases, done, ok = TRUE, title = NULL,
+                            note = NULL, stopped = FALSE) {
     session$sendCustomMessage("ongeor-progress", list(
       phases = as.list(as.character(phases)),
       done = isTRUE(done),
       ok = isTRUE(ok),
       title = title %||% "",
+      note = note %||% "",
+      stopped = isTRUE(stopped),
       hint = dialog_hint$text %||% ""
     ))
   }
@@ -2052,8 +2085,11 @@ server <- function(input, output, session) {
       failed    = paste(what, "failed."),
       cancelled = paste(what, "cancelled."),
       paste(what, state))
+    cancelled <- identical(state, "cancelled")
     push_progress(phases, done = TRUE,
-      ok = identical(state, "completed"), title = title)
+      ok = identical(state, "completed"), title = title,
+      note = if (cancelled) cancel_wait_note else NULL,
+      stopped = cancelled)
   }
 
   observeEvent(preview_state(), {
@@ -2096,16 +2132,12 @@ server <- function(input, output, session) {
       request_cancel(isolate(link_cancel_path()))
       link_generation(link_generation() + 1L)
       link_state("cancelled")
-      link_state_detail(
-        "Cancelled; results discarded. Background work stops at its next step."
-      )
+      link_state_detail(paste("Cancelling.", cancel_wait_note))
     } else if (identical(preview_state(), "running")) {
       request_cancel(isolate(preview_cancel_path()))
       preview_generation(preview_generation() + 1L)
       preview_state("cancelled")
-      preview_state_detail(
-        "Cancelled; preview discarded. Background work stops at its next step."
-      )
+      preview_state_detail(paste("Cancelling.", cancel_wait_note))
     }
   })
 

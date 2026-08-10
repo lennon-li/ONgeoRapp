@@ -42,6 +42,11 @@ test_that("Cancel writes the sentinel for whichever task is running", {
 
     expect_true(file.exists(preview_path))
     expect_equal(preview_state(), "cancelled")
+    # The user must be TOLD the wait exists. Cancellation is cooperative, so
+    # "Cancelled." on its own is a lie while a download is still finishing.
+    expect_match(preview_state_detail(), "^Cancelling\\.")
+    expect_match(preview_state_detail(), "cannot be interrupted")
+    expect_match(preview_state_detail(), "close and restart the app")
 
     link_path <- withr::local_tempfile(fileext = ".txt")
     link_cancel_path(link_path)
@@ -50,6 +55,8 @@ test_that("Cancel writes the sentinel for whichever task is running", {
 
     expect_true(file.exists(link_path))
     expect_equal(link_state(), "cancelled")
+    expect_match(link_state_detail(), "^Cancelling\\.")
+    expect_match(link_state_detail(), "close and restart the app")
   })
 })
 
