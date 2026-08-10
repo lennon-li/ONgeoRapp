@@ -452,7 +452,6 @@ zip_directory_to <- function(dir, dest) {
   old_wd <- setwd(dir)
   on.exit(setwd(old_wd), add = TRUE, after = FALSE)
   utils::zip(zip_path, files = list.files(dir))
-  setwd(old_wd)
   if (!file.exists(zip_path)) {
     rlang::abort("Failed to build the shapefile archive.")
   }
@@ -497,22 +496,20 @@ collapse_crosswalk_best_match <- function(crosswalk) {
   } else {
     rep(NA_real_, n)
   }
-  unique_ids <- unique(ids)
-  keep <- integer(length(unique_ids))
-  for (u in seq_along(unique_ids)) {
-    rows <- if (is.na(unique_ids[u])) which(is.na(ids)) else which(ids == unique_ids[u])
+  rows_by_id <- split(seq_len(n), match(ids, unique(ids)))
+  keep <- vapply(rows_by_id, function(rows) {
     cov <- coverage[rows]
     if (any(!is.na(cov))) {
-      keep[u] <- rows[which(!is.na(cov))][which.max(cov[!is.na(cov)])]
+      rows[which(!is.na(cov))][which.max(cov[!is.na(cov)])]
     } else {
       dist <- distance[rows]
       if (any(!is.na(dist))) {
-        keep[u] <- rows[which(!is.na(dist))][which.min(dist[!is.na(dist)])]
+        rows[which(!is.na(dist))][which.min(dist[!is.na(dist)])]
       } else {
-        keep[u] <- rows[1L]
+        rows[1L]
       }
     }
-  }
+  }, integer(1))
   # sort() restores original row order of the winning rows; deterministic.
   crosswalk[sort(keep), , drop = FALSE]
 }
@@ -527,16 +524,19 @@ collapse_crosswalk_best_match <- function(crosswalk) {
 # target) keep their first value, and `linked_cells` records how many rows were
 # reduced. Targets with no linked rows get NA attributes and a count of 0.
 aggregate_linked_by_target <- function(link_attrs, row_of_target, n_targets) {
-  rows_for <- function(i) which(row_of_target == i)
+  rows_by_target <- split(
+    seq_along(row_of_target),
+    factor(row_of_target, levels = seq_len(n_targets))
+  )
   reduced <- lapply(link_attrs, function(column) {
     if (is.numeric(column)) {
       vapply(seq_len(n_targets), function(i) {
-        values <- column[rows_for(i)]
+        values <- column[rows_by_target[[i]]]
         if (all(is.na(values))) NA_real_ else mean(values, na.rm = TRUE)
       }, numeric(1))
     } else {
       vapply(seq_len(n_targets), function(i) {
-        values <- column[rows_for(i)]
+        values <- column[rows_by_target[[i]]]
         if (length(values) == 0L) NA_character_ else as.character(values[1L])
       }, character(1))
     }
@@ -919,6 +919,42 @@ new_progress_path <- function() {
   tempfile(pattern = "ongeor-progress-", fileext = ".txt")
 }
 
+# --- Cooperative cancellation ---------------------------------------------
+# Cancel used to be a lie about the work: it bumped the generation counter so
+# the result would be discarded, set the state to "cancelled", and left the
+# future running to completion in a worker. Two consequences, the second
+# user-visible: a cancelled run kept burning a worker and its download, and
+# because ExtendedTask QUEUES invocations, the next Preview sat behind the
+# abandoned one showing "Starting" for as long as the discarded work took.
+#
+# There is no way to interrupt it from here. future::cancel() exists (future
+# 1.70.0) but ExtendedTask never exposes the underlying Future, and rebuilding
+# the task layer to expose it would mean rewriting the most delicate machinery
+# in this app (see extendedtask-observer-reflush-trap.md). So cancellation is
+# cooperative over the same channel the phase log already uses: the main
+# session creates a sentinel file, and the worker checks for it at each phase
+# boundary and aborts.
+#
+# HONEST LIMIT, stated because the button's label implies more: this aborts at
+# the NEXT phase boundary, not mid-call. A run blocked inside a first-time
+# multi-minute download - exactly when a user reaches for Cancel - keeps that
+# download alive until it returns. What it reliably prevents is proceeding to
+# the next expensive step (the join, or serialising a large layer back), which
+# is where most of the wasted time was.
+new_cancel_path <- function() {
+  tempfile(pattern = "ongeor-cancel-", fileext = ".txt")
+}
+
+# length-1 check first: a reactiveVal that has never been set yields NULL, and a
+# cleared one can yield character(0), where `nzchar(x)` is logical(0) and
+# `&& logical(0)` is an error in current R rather than FALSE.
+request_cancel <- function(path) {
+  if (length(path) == 1L && !is.na(path) && nzchar(path)) {
+    try(file.create(path), silent = TRUE)
+  }
+  invisible(NULL)
+}
+
 read_progress_phase <- function(path) {
   phases <- read_progress_phases(path)
   if (is.null(phases)) NULL else phases[length(phases)]
@@ -1054,10 +1090,13 @@ add_styled_sf_layer <- function(map, layer, group, style) {
     if (identical(style$point_shape, "square")) {
       buf_deg <- style$point_size * 0.0015
       coords <- sf::st_coordinates(layer)
+      cos_latitude <- pmax(cos(coords[, 2] * pi / 180), .Machine$double.eps)
+      longitude_offset <- buf_deg / cos_latitude
+      # Squares remain geography-sized (zoom-scaled), unlike pixel-radius circles.
       map <- leaflet::addRectangles(
         map,
-        lng1 = coords[, 1] - buf_deg, lat1 = coords[, 2] - buf_deg,
-        lng2 = coords[, 1] + buf_deg, lat2 = coords[, 2] + buf_deg,
+        lng1 = coords[, 1] - longitude_offset, lat1 = coords[, 2] - buf_deg,
+        lng2 = coords[, 1] + longitude_offset, lat2 = coords[, 2] + buf_deg,
         group = group, popup = popups,
         color = style$point_color, fillColor = style$point_color,
         fillOpacity = 0.8, weight = 1
@@ -1294,12 +1333,8 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
   }
   source_geom <- sf::st_geometry(source_sf)[source_idx[keep]]
   target_geom <- sf::st_geometry(target_sf)[target_idx[keep]]
-  lines <- sf::st_sfc(
-    lapply(seq_along(source_geom), function(i) {
-      sf::st_nearest_points(source_geom[i], target_geom[i], pairwise = TRUE)[[1]]
-    }),
-    crs = sf::st_crs(source_sf)
-  )
+  lines <- sf::st_nearest_points(source_geom, target_geom, pairwise = TRUE)
+  sf::st_crs(lines) <- sf::st_crs(source_sf)
   sf::st_sf(geometry = lines)
 }
 
@@ -1403,7 +1438,8 @@ server <- function(input, output, session) {
                                                      generation,
                                                      postal_layer = NULL,
                                                      progress_path = NULL,
-                                                     bbox = NULL) {
+                                                     bbox = NULL,
+                                                     cancel_path = NULL) {
     promises::future_promise({
       # Defined INSIDE the future block on purpose. The app-level
       # pack_spatial() is a closure over the app source environment, which
@@ -1430,15 +1466,32 @@ server <- function(input, output, session) {
           ONgeoR::retrieve_source(id)
         }
       }
+      # Local copy for the same export reason as pack()/note(); cancel_path is a
+      # plain character scalar. See new_cancel_path() for what this can and
+      # cannot do.
+      stop_if_cancelled <- function() {
+        if (!is.null(cancel_path) && file.exists(cancel_path)) {
+          stop(structure(
+            class = c("ongeor_cancelled", "error", "condition"),
+            list(message = "Run cancelled by the user.", call = NULL)
+          ))
+        }
+      }
       note(if (is.null(bbox)) {
         "Retrieving source data..."
       } else {
         "Retrieving source data (current map view only)..."
       })
+      stop_if_cancelled()
       base_sf    <- fetch(base_id)
       note("Retrieving target data...")
+      stop_if_cancelled()
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
       note("Preparing layers for the map...")
+      # Checked before packing: a full-resolution layer is expensive to
+      # serialise back across the future boundary, and a cancelled result is
+      # discarded by the generation guard on arrival anyway.
+      stop_if_cancelled()
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
            base_id = base_id, overlay_id = overlay_id,
@@ -1450,7 +1503,8 @@ server <- function(input, output, session) {
                                                    generation,
                                                    postal_layer = NULL,
                                                    progress_path = NULL,
-                                                   bbox = NULL) {
+                                                   bbox = NULL,
+                                                   cancel_path = NULL) {
     promises::future_promise({
       # Local copies, not the app-level pack_spatial()/layer_geom() - see the
       # note in preview_task: those closures enclose the multisession plan and
@@ -1475,15 +1529,31 @@ server <- function(input, output, session) {
           ONgeoR::retrieve_source(id)
         }
       }
+      # Local copy for the same export reason as pack()/note(). See
+      # new_cancel_path() for the honest limit on what this achieves.
+      stop_if_cancelled <- function() {
+        if (!is.null(cancel_path) && file.exists(cancel_path)) {
+          stop(structure(
+            class = c("ongeor_cancelled", "error", "condition"),
+            list(message = "Run cancelled by the user.", call = NULL)
+          ))
+        }
+      }
       note(if (is.null(bbox)) {
         "Retrieving source data..."
       } else {
         "Retrieving source data (current map view only)..."
       })
+      stop_if_cancelled()
       base_sf    <- fetch(base_id)
       note("Retrieving target data...")
+      stop_if_cancelled()
       overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
       note("Joining layers...")
+      # The single most valuable checkpoint: every branch below is the actual
+      # spatial join, and this is the boundary a user who cancelled during
+      # retrieval reaches next.
+      stop_if_cancelled()
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
       if (base_kind == "raster" || overlay_kind == "raster") {
@@ -1645,6 +1715,38 @@ server <- function(input, output, session) {
   # new_progress_path / read_progress_phase).
   preview_progress_path <- reactiveVal(NULL)
   link_progress_path <- reactiveVal(NULL)
+  # Sentinel paths the Cancel button touches; the workers poll them at phase
+  # boundaries (see new_cancel_path()).
+  preview_cancel_path <- reactiveVal(NULL)
+  link_cancel_path <- reactiveVal(NULL)
+
+  # Each run now owns TWO temp files (phase log + cancel sentinel), and every
+  # terminal OR abandoned path has to drop both. Centralised because the
+  # abandoned paths are easy to miss: the link status observer unlinked only
+  # after its two early returns, so an inputs-changed or superseded-generation
+  # run leaked its phase file every time.
+  # CRITICAL ordering constraint, found by test-cancel.R rather than by reading:
+  # the cancel sentinel must outlive the state change that requests it. Cancel
+  # sets preview_state("cancelled"), which invalidates the terminal-state
+  # observer below in the SAME flush - and when that observer cleared both files,
+  # it deleted the sentinel before the still-running worker had a chance to see
+  # it, so cancellation silently did nothing at all. Only clear the sentinel once
+  # the worker has actually returned (the task-status observers); the
+  # state-driven observer clears the phase log only.
+  clear_preview_progress_file <- function() {
+    unlink(isolate(preview_progress_path()) %||% character())
+  }
+  clear_preview_run_files <- function() {
+    clear_preview_progress_file()
+    unlink(isolate(preview_cancel_path()) %||% character())
+  }
+  clear_link_progress_file <- function() {
+    unlink(isolate(link_progress_path()) %||% character())
+  }
+  clear_link_run_files <- function() {
+    clear_link_progress_file()
+    unlink(isolate(link_cancel_path()) %||% character())
+  }
   preview_progress_log <- reactiveVal(character())
   link_progress_log <- reactiveVal(character())
 
@@ -1957,7 +2059,9 @@ server <- function(input, output, session) {
   observeEvent(preview_state(), {
     st <- preview_state()
     if (st %in% c("completed", "failed", "cancelled")) {
-      unlink(isolate(preview_progress_path()) %||% character())
+      # Phase log only - see clear_preview_run_files() on why the cancel
+      # sentinel must survive this observer.
+      clear_preview_progress_file()
       # "completed" is deliberately NOT finished here. A successful preview is
       # only done once the browser reports the map drawn (await_preview_render),
       # and this observer must not pre-empt that with a premature done = TRUE.
@@ -1983,15 +2087,25 @@ server <- function(input, output, session) {
     removeModal()
   })
 
+  # The generation bump is what makes the UI forget the run; request_cancel()
+  # is what makes the WORKER stop, at its next phase boundary. The detail text
+  # says "stops at its next step" rather than implying an instant halt, because
+  # a download already in flight cannot be interrupted - see new_cancel_path().
   observeEvent(input$cancel_task_btn, {
     if (identical(link_state(), "running")) {
+      request_cancel(isolate(link_cancel_path()))
       link_generation(link_generation() + 1L)
       link_state("cancelled")
-      link_state_detail("Cancelled; the previous run was discarded.")
+      link_state_detail(
+        "Cancelled; results discarded. Background work stops at its next step."
+      )
     } else if (identical(preview_state(), "running")) {
+      request_cancel(isolate(preview_cancel_path()))
       preview_generation(preview_generation() + 1L)
       preview_state("cancelled")
-      preview_state_detail("Cancelled; the previous preview was discarded.")
+      preview_state_detail(
+        "Cancelled; preview discarded. Background work stops at its next step."
+      )
     }
   })
 
@@ -2083,18 +2197,36 @@ server <- function(input, output, session) {
     preview_state_detail("Starting.")
     bbox <- requested_bbox()
     previewed_bbox(bbox)
+    cancel_path <- new_cancel_path()
+    preview_cancel_path(cancel_path)
     preview_task$invoke(input$base_layer, input$overlay_source, generation,
-      postal_layer, path, bbox)
+      postal_layer, path, bbox, cancel_path)
   })
 
   observeEvent(preview_task$status(), {
     s <- preview_task$status()
     if (!s %in% c("success", "error")) return()
-    if (!identical(preview_active_generation(), preview_generation())) return()
+    if (!identical(preview_active_generation(), preview_generation())) {
+      clear_preview_run_files()
+      return()
+    }
     result <- tryCatch(preview_task$result(), error = function(e) e)
+    # A cancelled worker is not a failure. In the normal flow the Cancel handler
+    # also bumps the generation, so the guard above already dropped this result
+    # and we never get here - but reporting "Failed" for a run the user stopped
+    # would be a lie about our own state, so classify it explicitly rather than
+    # relying on that ordering holding forever.
+    if (inherits(result, "ongeor_cancelled")) {
+      clear_preview_run_files()
+      preview_state("cancelled")
+      preview_state_detail("Cancelled; preview discarded.")
+      push_progress(isolate(preview_progress_log()), done = TRUE, ok = FALSE,
+        title = "Preview cancelled.")
+      return()
+    }
     if (inherits(result, "error")) {
       described <- describe_retrieval_failure(result)
-      unlink(isolate(preview_progress_path()) %||% character())
+      clear_preview_run_files()
       preview_state("failed")
       preview_state_detail(described$message)
       showNotification(retrieval_failure_notification(described),
@@ -2152,7 +2284,7 @@ server <- function(input, output, session) {
     # observeEvent(preview_state()): observers invalidated inside this
     # promise-resolution flush are never re-flushed.
     await_preview_render(phases)
-    unlink(isolate(preview_progress_path()) %||% character())
+    clear_preview_run_files()
   }, ignoreInit = TRUE)
 
   # Join asks first. build_btn only opens the confirmation; confirm_join_btn
@@ -2208,24 +2340,20 @@ server <- function(input, output, session) {
     link_state("running")
     link_state_detail("Starting.")
     link_progress_path(new_progress_path())
+    link_cancel_path(new_cancel_path())
     link_progress_log(character())
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
     session$sendCustomMessage("ongeor-data-tab", TRUE)
-    postal_layer <- NULL
-    if (identical(input$overlay_source, "postal_upload")) {
-      pr <- postal_result()
-      req(pr, pr$sf)
-      postal_layer <- pr$sf
-    }
     build_task$invoke(
       input$base_layer,
       input$overlay_source,
       generation,
       postal_layer,
       isolate(link_progress_path()),
-      isolate(previewed_bbox())
+      isolate(previewed_bbox()),
+      isolate(link_cancel_path())
     )
   })
 
@@ -2237,6 +2365,7 @@ server <- function(input, output, session) {
       overlay_source = input$overlay_source
     )
     if (!identical(link_active_inputs(), current_inputs)) {
+      clear_link_run_files()
       link_state("cancelled")
       link_state_detail("Inputs changed; the previous run was discarded.")
       cw_result$crosswalk <- NULL
@@ -2244,9 +2373,19 @@ server <- function(input, output, session) {
       cw_result$pairs <- NULL
       return()
     }
-    if (!identical(link_active_generation(), link_generation())) return()
-    unlink(isolate(link_progress_path()) %||% character())
+    if (!identical(link_active_generation(), link_generation())) {
+      clear_link_run_files()
+      return()
+    }
+    clear_link_run_files()
     result <- tryCatch(build_task$result(), error = function(e) e)
+    # See the matching note in the preview observer: a cancelled worker is not a
+    # failure, and must not be reported as one.
+    if (inherits(result, "ongeor_cancelled")) {
+      link_state("cancelled")
+      link_state_detail("Cancelled; results discarded.")
+      return()
+    }
     if (inherits(result, "error")) {
       described <- describe_retrieval_failure(result)
       link_state("failed")
