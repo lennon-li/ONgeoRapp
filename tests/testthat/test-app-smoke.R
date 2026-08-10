@@ -54,6 +54,31 @@ withr::defer(
   envir = testthat::teardown_env()
 )
 
+# Page.navigate is issued through Chromote$default_timeout, which is 10 s. The
+# app's first paint draws the bundled PHU_simple furniture layer before it can
+# signal ready, and past 10 s AppDriver$new() aborts with "Chromote: timed out
+# waiting for response to command Page.navigate" - before any app code runs, so
+# the failure says nothing about the app and looks like a broken test.
+#
+# Both tools/take_screenshots.R and tools/verify_postal_upload.R already raise
+# this to 60 s and say why (take_screenshots.R's header calls it out
+# explicitly); this file was the only AppDriver caller that did not, which is
+# why the suite's single browser check was also its only flaky one. Verified
+# 2026-08-09: with the default 10 s this file failed at AppDriver$new() on both
+# HEAD and its parent while bare chromote launched fine, and at 60 s the same
+# app loads in ~2 s and completes a preview in ~42 s.
+#
+# Set on the shared default object rather than by passing a new Chrome to each
+# AppDriver, so both tests here reuse one browser, and restored afterwards so a
+# developer's existing chromote session is left as it was found.
+chromote_object <- chromote::default_chromote_object()
+chromote_timeout_before <- chromote_object$default_timeout
+chromote_object$default_timeout <- 60
+withr::defer(
+  chromote_object$default_timeout <- chromote_timeout_before,
+  envir = testthat::teardown_env()
+)
+
 test_that("Shiny app boots and exposes its offline workflow controls", {
   app <- shinytest2::AppDriver$new(
     app_dir = dirname(shiny_app_file()),
