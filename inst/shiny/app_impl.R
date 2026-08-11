@@ -437,25 +437,29 @@ read_uploaded_file <- function(name, datapath) {
 # only by their disabled state.
 # Zip everything in `dir` and place the archive at EXACTLY `dest`.
 #
-# utils::zip() appends ".zip" whenever the target does not already end in
-# it, and downloadHandler hands its content function an EXTENSIONLESS
-# tempfile. Zipping straight onto that path therefore writes "<tmp>.zip"
-# and leaves "<tmp>" absent, so Shiny serves nothing and the browser
-# download fails -- observed 2026-08-06 in headless Chrome. The unit test
-# missed it because testServer supplies a path matching the declared
-# filename, which does end in .zip, so the test agreed with itself.
+# zip::zip() rather than utils::zip(), because utils::zip() shells out to an
+# external `zip` executable (R_ZIPCMD, default "zip") that Windows R does not
+# ship -- it arrives only with Rtools. On a stock Windows machine both zipped
+# downloads therefore died here, while CI stayed green: r-lib/actions puts
+# Rtools on PATH, and the test skipped itself when no zip was found. zip::zip
+# is pure C with no external binary, so the same code now works everywhere.
 #
-# Kept as a named helper rather than inline so the extensionless case can
-# be asserted directly in tests.
+# It also writes EXACTLY the path given, unlike utils::zip(), which appends
+# ".zip" whenever the target does not already end in it. downloadHandler hands
+# its content function an EXTENSIONLESS tempfile, so the old code wrote
+# "<tmp>.zip", left "<tmp>" absent, and the browser download failed -- observed
+# 2026-08-06 in headless Chrome. That is why `dest` is written directly here
+# and asserted extensionless in tests: testServer supplies a path matching the
+# declared filename, which does end in .zip, so a naive test agrees with itself.
+#
+# `root = dir` replaces a setwd()/on.exit() dance, so no working directory is
+# mutated. A pre-existing (possibly empty) `dest` is overwritten, which is what
+# downloadHandler hands over.
 zip_directory_to <- function(dir, dest) {
-  zip_path <- tempfile(fileext = ".zip")
-  old_wd <- setwd(dir)
-  on.exit(setwd(old_wd), add = TRUE, after = FALSE)
-  utils::zip(zip_path, files = list.files(dir))
-  if (!file.exists(zip_path)) {
+  zip::zip(dest, files = list.files(dir), root = dir)
+  if (!file.exists(dest)) {
     rlang::abort("Failed to build the shapefile archive.")
   }
-  file.copy(zip_path, dest, overwrite = TRUE)
   invisible(dest)
 }
 

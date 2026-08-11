@@ -62,10 +62,9 @@ test_that("merged download object carries target, source, and join attributes", 
 test_that("target_shapes.zip carries GeoPackage, shapefile sidecars, and a field-name map", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
-  skip_if(
-    !nzchar(Sys.which("zip")) && !nzchar(Sys.getenv("R_ZIPCMD")),
-    "zip executable not available"
-  )
+  # No zip-executable skip: zip::zip() needs no external binary. The old
+  # skip_if() was worse than a failure - on a Windows box without Rtools it
+  # went quiet while the download it covers was broken.
   drivers <- sf::st_drivers()
   skip_if(!("ESRI Shapefile" %in% drivers$name), "ESRI Shapefile driver not available")
 
@@ -211,12 +210,14 @@ test_that("target_tables.zip carries results and pairs tables", {
 
 test_that("zip_directory_to writes to an extensionless path", {
   # Regression gate for the 2026-08-06 browser failure. downloadHandler hands
-  # its content function an EXTENSIONLESS tempfile, but utils::zip() appends
-  # ".zip" unless the target already ends in it -- so zipping straight onto
-  # that path wrote "<tmp>.zip", left "<tmp>" absent, and the browser download
-  # failed while the unit test passed. The test passed because testServer
-  # supplies a path matching the declared filename, which does end in ".zip";
-  # it agreed with itself. This asserts the case the app actually hits.
+  # its content function an EXTENSIONLESS tempfile, and the utils::zip() this
+  # once used appended ".zip" unless the target already ended in it -- so
+  # zipping straight onto that path wrote "<tmp>.zip", left "<tmp>" absent, and
+  # the browser download failed while the unit test passed. The test passed
+  # because testServer supplies a path matching the declared filename, which
+  # does end in ".zip"; it agreed with itself. zip::zip() writes the exact path
+  # given, but this still asserts the case the app actually hits rather than
+  # trusting that property to stay true.
   env <- load_shiny_app_env()
   zip_directory_to <- env$zip_directory_to
 
