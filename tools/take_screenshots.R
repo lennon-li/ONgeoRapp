@@ -71,6 +71,76 @@ js_get <- function(app, expr) {
 }
 
 # ---------------------------------------------------------------------------
+# Progress-dialog helpers.
+#
+# Since 8fc00a5 / 686394f every run opens a MODAL progress dialog that stays on
+# screen until the user clicks OK. That changed what this script has to do in
+# two ways, and both were breaking it:
+#
+#   1. The dialog is the app's own completion signal. OK (#progress_ok_btn) has
+#      class d-none for the whole run and is revealed only when the run is
+#      genuinely done - for a preview, only after the BROWSER reports the map
+#      drawn (cw_map_rendered). That is a stronger oracle than the presence of
+#      #build_btn, which says the server sent a result, not that it is visible.
+#   2. A modal left open sits on top of everything, so any screenshot taken
+#      while it is up shows the dialog instead of the app, and clicks aimed at
+#      the page behind it are swallowed by the backdrop.
+# ---------------------------------------------------------------------------
+dialog_done <- function(app) {
+  identical(js_get(app,
+    "(function() {
+       var ok = document.getElementById('progress_ok_btn');
+       return (ok && !ok.classList.contains('d-none')) ? 'yes' : 'no';
+     })()"), "yes")
+}
+
+# Wait for the dialog to report completion. Returns TRUE on success, FALSE on
+# timeout, so the caller decides whether a partial set is acceptable.
+wait_for_dialog <- function(app, what, limit = 300, interval = 5) {
+  waited <- 0
+  repeat {
+    Sys.sleep(interval)
+    waited <- waited + interval
+    done <- dialog_done(app)
+    phases <- js_get(app,
+      "(document.getElementById('task_phase_list') || {innerText: ''}).innerText.replace(/\\s+/g, ' ').trim()")
+    message(sprintf("  [%3ds] %s done=%s | %s", waited, what,
+      if (done) "yes" else "no",
+      substr(if (is.null(phases) || !nzchar(phases)) "(no phases yet)" else phases, 1, 90)))
+    if (done) return(TRUE)
+    if (waited >= limit) {
+      message("WARNING: ", what, " did not finish within ", limit, " s.")
+      return(FALSE)
+    }
+  }
+}
+
+# Click OK and wait for the modal to actually leave the DOM. Bootstrap animates
+# the fade-out, so a fixed sleep either wastes time or shoots the backdrop.
+dismiss_dialog <- function(app, limit = 30) {
+  if (!dialog_done(app)) message("  note: dismissing a dialog that has not reported done")
+  try(app$click("progress_ok_btn"), silent = TRUE)
+  waited <- 0
+  repeat {
+    Sys.sleep(1)
+    waited <- waited + 1
+    gone <- js_get(app,
+      "(function() {
+         var m = document.querySelectorAll('.modal.show, .modal-backdrop');
+         return m.length === 0 ? 'yes' : 'no';
+       })()")
+    if (identical(gone, "yes")) {
+      message("  dialog dismissed after ", waited, " s.")
+      return(invisible(TRUE))
+    }
+    if (waited >= limit) {
+      message("  WARNING: modal still present after ", limit, " s.")
+      return(invisible(FALSE))
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Configure chromote: --no-sandbox and raise default_timeout from 10 s to 60 s.
 # ---------------------------------------------------------------------------
 {
@@ -150,41 +220,25 @@ clean_shot(app, file.path(fig_dir, "app-link-tab.png"), delay = 0)
 # ---------------------------------------------------------------------------
 message("--- Clicking 'Preview on map' ---")
 app$click("preview_btn")
-message("Clicked. Polling for Join button to become enabled (up to 300 s) ...")
+message("Clicked. Waiting for the progress dialog to report completion (up to 300 s) ...")
 
-waited  <- 0
-interval <- 5
-limit    <- 300
-
-repeat {
-  Sys.sleep(interval)
-  waited <- waited + interval
-
-  join_state <- js_get(app,
-    "document.getElementById('build_btn') ? 'enabled' : 'absent'"
-  )
-  preview_label <- js_get(app,
-    "(document.getElementById('preview_btn') || {innerText: '?'}).innerText"
-  )
-
-  message(sprintf("  [%3ds] build_btn=%s  preview_label=%s", waited,
-                  if (is.null(join_state)) "NULL" else join_state,
-                  if (is.null(preview_label)) "NULL" else preview_label))
-
-  if (identical(join_state, "enabled")) {
-    message("  Preview complete: Join button is enabled.")
-    break
-  }
-
-  if (waited >= limit) {
-    message("WARNING: Preview did not finish within ", limit, " s.")
-    message("  Captured: man/figures/app-link-tab.png")
-    message("  Tip: ensure cache is warm for phu_boundaries + moh_service_locations.")
-    quit(save = "no", status = 0)
-  }
+if (!wait_for_dialog(app, "preview", limit = 300)) {
+  message("  Captured: man/figures/app-link-tab.png")
+  message("  Tip: ensure cache is warm for phu_boundaries + moh_service_locations.")
+  quit(save = "no", status = 0)
 }
 
-# Allow leaflet tiles a moment to render before screenshot
+# Cross-check the server agrees the Join button now exists. If the dialog says
+# done but build_btn is absent, something is wrong that a screenshot would hide.
+join_state <- js_get(app, "document.getElementById('build_btn') ? 'enabled' : 'absent'")
+message("  build_btn after completion: ", join_state %||% "NULL")
+if (!identical(join_state, "enabled")) {
+  stop("Dialog reported done but #build_btn is absent - refusing to capture a misleading shot.")
+}
+
+dismiss_dialog(app)
+
+# Leaflet tiles finish drawing after the dialog closes.
 Sys.sleep(3)
 
 # ---------------------------------------------------------------------------
@@ -212,44 +266,21 @@ clean_shot(app, file.path(fig_dir, "app-join-confirm.png"), delay = 0.5)
 message("--- Clicking 'Run join' to confirm ---")
 app$click("confirm_join_btn")
 
-message("Waiting for join to complete (up to 240 s) ...")
-waited <- 0
-repeat {
-  Sys.sleep(5)
-  waited <- waited + 5
-
-  # The confirmed download button for the CSV result is dl_cw_csv.
-  # It transitions from disabled-wrapper to an actual downloadButton anchor
-  # once the crosswalk is ready.  Check for the enabled anchor tag:
-  dl_ready <- js_get(app,
-    "(function() {
-       var el = document.getElementById('dl_cw_csv');
-       return el ? 'yes' : 'no';
-     })()"
-  )
-
-  # Also probe link_task_status text (shows "Results and downloads are ready.")
-  status_text <- js_get(app,
-    "(document.getElementById('link_task_status') || {innerText: ''}).innerText.trim()"
-  )
-
-  message(sprintf("  [%3ds] dl_cw_csv=%s  status=%s", waited,
-                  if (is.null(dl_ready)) "NULL" else dl_ready,
-                  if (is.null(status_text) || nchar(status_text) == 0) "(empty)" else status_text))
-
-  if (identical(dl_ready, "yes") ||
-      grepl("ready", status_text %||% "", ignore.case = TRUE)) {
-    message("  Join complete.")
-    break
-  }
-
-  if (waited >= 240) {
-    message("WARNING: Join did not complete within 240 s.")
-    message("  Captured: app-link-tab.png, app-preview-map.png, app-join-confirm.png.")
-    quit(save = "no", status = 0)
-  }
+# The confirmation box becomes the progress box in place, so the same dialog
+# oracle applies to the join.
+message("Waiting for the join to report completion (up to 240 s) ...")
+if (!wait_for_dialog(app, "join", limit = 240)) {
+  message("  Captured: app-link-tab.png, app-preview-map.png, app-join-confirm.png.")
+  quit(save = "no", status = 0)
 }
 
+status_text <- js_get(app,
+  "(document.getElementById('link_task_status') || {innerText: ''}).innerText.trim()")
+message("  link_task_status: ", if (is.null(status_text) || !nzchar(status_text)) "(empty)" else status_text)
+
+dismiss_dialog(app)
+
+# ---------------------------------------------------------------------------
 # Click the Data sub-tab
 message("--- Switching to Data sub-tab ---")
 tryCatch(
