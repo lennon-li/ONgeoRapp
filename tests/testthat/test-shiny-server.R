@@ -784,17 +784,19 @@ test_that("map.html download bundles PHU_simple alongside the two sources", {
     )
 
     # Active sources first, furniture pinned to the bottom of the overlay
-    # list.
+    # list. Each slot carries the layer's own name, so the layers control
+    # says WHICH layer it means rather than only which slot.
     expect_identical(
       furniture_test_overlay_groups(link_map()),
-      c("Source layer", "Target layer", "PHU_simple")
+      c("Source layer - Base polygon", "Target layer - Overlay point",
+        "PHU_simple")
     )
 
     map_file <- output$dl_cw_map
     html <- paste(readLines(map_file, warn = FALSE), collapse = "\n")
     expect_match(html, "PHU_simple", fixed = TRUE)
-    expect_match(html, "Source layer", fixed = TRUE)
-    expect_match(html, "Target layer", fixed = TRUE)
+    expect_match(html, "Source layer - Base polygon", fixed = TRUE)
+    expect_match(html, "Target layer - Overlay point", fixed = TRUE)
 
     # The addition is surfaced in the download UI, not silent.
     expect_match(
