@@ -155,7 +155,7 @@
         "Depends": "R (>= 4.1.0)",
         "Roxygen": "list(markdown = TRUE)",
         "Imports": "htmlwidgets, httr2, leaflet, rlang, sf, terra, tibble, yaml",
-        "Suggests": "knitr, pkgdown, rmarkdown, testthat (>= 3.0.0), withr",
+        "Suggests": "knitr, pkgdown, readxl, rmarkdown, testthat (>= 3.0.0), withr",
         "VignetteBuilder": "knitr",
         "Config/testthat/edition": "3",
         "URL": "https://github.com/lennon-li/ONgeoR,\nhttps://lennon-li.github.io/ONgeoR/",
@@ -167,16 +167,16 @@
         "RemoteUsername": "lennon-li",
         "RemotePkgRef": "github::lennon-li/ONgeoR",
         "RemoteRef": "HEAD",
-        "RemoteSha": "595d27d0033ec8794067a5c216465b83ea78b020",
+        "RemoteSha": "b33311d79075f6bad19631a0a9ef35ce2b3a731c",
         "GithubRepo": "ONgeoR",
         "GithubUsername": "lennon-li",
         "GithubRef": "HEAD",
-        "GithubSHA1": "595d27d0033ec8794067a5c216465b83ea78b020",
+        "GithubSHA1": "b33311d79075f6bad19631a0a9ef35ce2b3a731c",
         "NeedsCompilation": "no",
-        "Packaged": "2026-08-11 13:32:20 UTC; yeli",
+        "Packaged": "2026-08-19 14:23:14 UTC; yeli",
         "Author": "Lennon Li [aut, cre],\n  Steven Johnson [aut]",
         "Maintainer": "Lennon Li <lennon.yeli@gmail.com>",
-        "Built": "R 4.6.1; ; 2026-08-11 13:32:21 UTC; unix"
+        "Built": "R 4.6.1; ; 2026-08-19 14:23:16 UTC; unix"
       }
     },
     "R6": {
