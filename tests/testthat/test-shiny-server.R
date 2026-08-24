@@ -18,6 +18,71 @@ test_that("layer pickers offer only geometry-appropriate choices", {
   )
 })
 
+test_that("open postal codes are target choices but never source choices", {
+  registry <- function() tibble::tibble(
+    source_id = c("base_polygon", "postal_points"),
+    name = c("Base polygon", "Open postal points"),
+    geography_type = c("boundary", "facility"),
+    feature_count = c(3L, 100L)
+  )
+  metadata <- function(source_id) list(
+    name = if (identical(source_id, "postal_points")) {
+      "Open postal points"
+    } else {
+      "Base polygon"
+    },
+    geography_type = if (identical(source_id, "postal_points")) {
+      "facility"
+    } else {
+      "boundary"
+    }
+  )
+  testthat::local_mocked_bindings(
+    list_sources = registry,
+    get_source = metadata,
+    .package = "ONgeoR"
+  )
+  env <- load_shiny_app_env()
+
+  expect_true("postal_points" %in% unname(unlist(env$target_choices_grouped())))
+  expect_false("postal_points" %in% unname(unlist(env$source_choices_grouped())))
+  expect_false("postal_points" %in%
+    unname(unlist(env$target_choices_grouped(include_open_postal = FALSE))))
+})
+
+test_that("custom target validation accepts points and rejects other inputs", {
+  env <- load_shiny_app_env()
+  point_file <- withr::local_tempfile(fileext = ".geojson")
+  polygon_file <- withr::local_tempfile(fileext = ".geojson")
+  # Use explicit sf objects so this test remains focused on the validator's
+  # geometry contract rather than a particular vector-file writer.
+  points <- sf::st_as_sf(
+    data.frame(id = 1:2, x = c(-79, -80), y = c(43, 44)),
+    coords = c("x", "y"), crs = 4326
+  )
+  polygons <- sf::st_sf(
+    id = 1L,
+    geometry = sf::st_sfc(
+      sf::st_polygon(list(matrix(
+        c(-80, 43, -79, 43, -79, 44, -80, 44, -80, 43),
+        ncol = 2, byrow = TRUE
+      ))),
+      crs = 4326
+    )
+  )
+  sf::st_write(points, point_file, quiet = TRUE, delete_dsn = TRUE)
+  sf::st_write(polygons, polygon_file, quiet = TRUE, delete_dsn = TRUE)
+
+  expect_s3_class(env$read_uploaded_point_vector("points.geojson", point_file)$sf, "sf")
+  polygon_result <- env$read_uploaded_point_vector("polygons.geojson", polygon_file)
+  expect_null(polygon_result$sf)
+  expect_match(polygon_result$error, "point|polygon", ignore.case = TRUE)
+
+  raster_result <- env$read_uploaded_point_vector("target.tif", point_file)
+  expect_null(raster_result$sf)
+  expect_match(raster_result$error, "Raster", ignore.case = TRUE)
+})
+
 test_that("source selections update geometry and relationship displays", {
   skip_if_not_installed("shiny")
   skip_if_not_installed("bslib")
@@ -787,14 +852,14 @@ test_that("map.html download bundles PHU_simple alongside the two sources", {
     # list.
     expect_identical(
       furniture_test_overlay_groups(link_map()),
-      c("Source layer", "Target layer", "PHU_simple")
+      c("Base polygon", "Overlay point", "PHU_simple")
     )
 
     map_file <- output$dl_cw_map
     html <- paste(readLines(map_file, warn = FALSE), collapse = "\n")
     expect_match(html, "PHU_simple", fixed = TRUE)
-    expect_match(html, "Source layer", fixed = TRUE)
-    expect_match(html, "Target layer", fixed = TRUE)
+    expect_match(html, "Base polygon", fixed = TRUE)
+    expect_match(html, "Overlay point", fixed = TRUE)
 
     # The addition is surfaced in the download UI, not silent.
     expect_match(
@@ -1248,6 +1313,182 @@ test_that("build_crosswalk merge collapses pairs and joins on from_id_col", {
   expect_equal(merged$to_id[merged$point_id == 2], "P1")
   # unmatched targets keep their geometry with NA attributes.
   expect_true(is.na(merged$to_id[merged$point_id == 3]))
+})
+
+test_that("mixed crosswalks carry all attributes once per target", {
+  env <- load_shiny_app_env()
+  source <- fixture_provenance(sf::st_sf(
+    source_id = c("S1", "S2"),
+    source_name = c("Source 1", "Source 2"),
+    source_attr_1 = 11:12,
+    source_attr_2 = c("a", "b"),
+    source_attr_3 = c(TRUE, FALSE),
+    source_attr_4 = c(1.1, 2.2),
+    source_attr_5 = c("x", "y"),
+    source_attr_6 = 21:22,
+    source_attr_7 = c("m", "n"),
+    source_attr_8 = c(FALSE, TRUE),
+    source_attr_9 = c(3.3, 4.4),
+    source_attr_10 = c("p", "q"),
+    geometry = sf::st_sfc(
+      sf::st_polygon(list(rbind(c(0, 0), c(1, 0), c(1, 1), c(0, 1), c(0, 0)))),
+      sf::st_polygon(list(rbind(c(1, 0), c(2, 0), c(2, 1), c(1, 1), c(1, 0)))),
+      crs = 4326
+    )
+  ))
+  target <- fixture_provenance(sf::st_as_sf(
+    tibble::tibble(
+      target_id = c("T1", "T2", "T3"),
+      target_name = c("Target 1", "Target 2", "Target 3"),
+      target_attr_1 = 101:103,
+      target_attr_2 = c("u", "v", "w"),
+      target_attr_3 = c(TRUE, FALSE, TRUE),
+      target_attr_4 = c(5.5, 6.6, 7.7),
+      target_attr_5 = c("i", "j", "k"),
+      x = c(.25, 1.25, 3), y = c(.25, .25, .25)
+    ),
+    coords = c("x", "y"), crs = 4326
+  ))
+  crosswalk <- tibble::tibble(
+    from_id = c("T1", "T1", "T2"),
+    from_name = c("Target 1", "Target 1", "Target 2"),
+    from_source = "target fixture",
+    to_id = c("S1", "S2", "S2"),
+    to_name = c("Source 1", "Source 2", "Source 2"),
+    to_source = "source fixture",
+    match_method = "within",
+    match_distance_km = NA_real_,
+    coverage = c(.4, .9, .8),
+    from_id_col = "target_id",
+    to_id_col = "source_id",
+    source_url_from = "https://example.test/target",
+    source_url_to = "https://example.test/source",
+    retrieved_at = as.POSIXct("2026-08-24", tz = "UTC")
+  )
+
+  normalized <- env$normalize_mixed_crosswalk(crosswalk, source, target)
+  expect_equal(nrow(normalized), nrow(target))
+  expect_true(all(c(
+    "src_source_id", "src_source_attr_10",
+    "tgt_target_id", "tgt_target_attr_5", "match_method",
+    "source_url_from", "retrieved_at"
+  ) %in% names(normalized)))
+  # T1 keeps the deterministic highest-coverage source, T2 is matched, and
+  # T3 remains present with its own attributes and NA source attributes.
+  expect_equal(normalized$to_id, c("S2", "S2", NA))
+  expect_equal(normalized$tgt_target_attr_5, c("i", "j", "k"))
+  expect_equal(normalized$src_source_attr_10[1:2], c("q", "q"))
+  expect_true(is.na(normalized$src_source_attr_10[3]))
+
+  merged <- env$merge_target_attributes(target, crosswalk = normalized)
+  expect_equal(nrow(merged), nrow(target))
+  expect_true(all(c("src_source_attr_1", "src_source_attr_10",
+    "tgt_target_attr_1", "tgt_target_attr_5") %in% names(merged)))
+  expect_true(is.na(merged$src_source_attr_1[3]))
+})
+
+test_that("mixed server results use the complete table for CSV and shapes", {
+  skip_if_not_installed("shiny")
+  skip_if_not_installed("bslib")
+  skip_if(!("GPKG" %in% sf::st_drivers()$name), "GPKG driver not available")
+
+  source <- fixture_provenance(sf::st_sf(
+    source_id = c("S1", "S2"),
+    source_name = c("Source 1", "Source 2"),
+    source_attr_1 = 11:12,
+    source_attr_2 = c("a", "b"),
+    source_attr_3 = c(TRUE, FALSE),
+    source_attr_4 = c(1.1, 2.2),
+    source_attr_5 = c("x", "y"),
+    source_attr_6 = 21:22,
+    source_attr_7 = c("m", "n"),
+    source_attr_8 = c(FALSE, TRUE),
+    source_attr_9 = c(3.3, 4.4),
+    source_attr_10 = c("p", "q"),
+    geometry = sf::st_sfc(
+      sf::st_polygon(list(rbind(c(0, 0), c(1, 0), c(1, 1), c(0, 1), c(0, 0)))),
+      sf::st_polygon(list(rbind(c(1, 0), c(2, 0), c(2, 1), c(1, 1), c(1, 0)))),
+      crs = 4326
+    )
+  ))
+  target <- fixture_provenance(sf::st_as_sf(
+    tibble::tibble(
+      target_id = c("T1", "T2", "T3"),
+      target_name = c("Target 1", "Target 2", "Target 3"),
+      target_attr_1 = 101:103,
+      target_attr_2 = c("u", "v", "w"),
+      target_attr_3 = c(TRUE, FALSE, TRUE),
+      target_attr_4 = c(5.5, 6.6, 7.7),
+      target_attr_5 = c("i", "j", "k"),
+      x = c(.25, 1.25, 3), y = c(.25, .25, .25)
+    ),
+    coords = c("x", "y"), crs = 4326
+  ))
+  registry <- tibble::tibble(
+    source_id = c("source_polygon", "target_points"),
+    name = c("Synthetic source", "Synthetic target"),
+    geography_type = c("boundary", "facility"),
+    feature_count = c(nrow(source), nrow(target))
+  )
+  layers <- list(source_polygon = source, target_points = target)
+  crosswalk <- tibble::tibble(
+    from_id = c("T1", "T1", "T2"),
+    from_name = c("Target 1", "Target 1", "Target 2"),
+    from_source = "target fixture",
+    to_id = c("S1", "S2", "S2"),
+    to_name = c("Source 1", "Source 2", "Source 2"),
+    to_source = "source fixture",
+    match_method = "within",
+    match_distance_km = NA_real_,
+    coverage = c(.4, .9, .8),
+    from_id_col = "target_id",
+    to_id_col = "source_id",
+    source_url_from = "https://example.test/target",
+    source_url_to = "https://example.test/source",
+    retrieved_at = as.POSIXct("2026-08-24", tz = "UTC")
+  )
+  metadata <- function(source_id) {
+    row <- registry[registry$source_id == source_id, , drop = FALSE]
+    list(name = row$name[[1]], service_layer = source_id,
+      geography_type = row$geography_type[[1]], feature_count = row$feature_count[[1]],
+      key_fields = list(id = if (source_id == "source_polygon") "source_id" else "target_id",
+        name = if (source_id == "source_polygon") "source_name" else "target_name"),
+      source_url = "https://example.test/fixture")
+  }
+  testthat::local_mocked_bindings(
+    list_sources = function() registry,
+    get_source = metadata,
+    retrieve_source = function(source_id, refresh = FALSE, ...) layers[[source_id]],
+    build_crosswalk = function(from, to, ...) crosswalk,
+    .package = "ONgeoR"
+  )
+  server <- load_shiny_server()
+  use_sequential_futures()
+
+  shiny::testServer(server, {
+    session$setInputs(base_layer = "source_polygon", overlay_source = "target_points",
+      preview_btn = 1)
+    expect_identical(wait_for_extended_task(preview_task, session), "success")
+    session$setInputs(confirm_join_btn = 1)
+    expect_identical(wait_for_extended_task(build_task, session), "success")
+    expect_equal(nrow(cw_result$crosswalk), nrow(target))
+    expect_true(all(c("src_source_attr_10", "tgt_target_attr_5") %in%
+      names(cw_result$crosswalk)))
+
+    csv_zip <- output$dl_cw_csv
+    csv_dir <- withr::local_tempdir()
+    utils::unzip(csv_zip, exdir = csv_dir)
+    mapping <- utils::read.csv(file.path(csv_dir, "mapping.csv"), check.names = FALSE)
+    expect_equal(nrow(mapping), nrow(target))
+    expect_true(all(c("src_source_attr_10", "tgt_target_attr_5") %in% names(mapping)))
+
+    shape_zip <- output$dl_cw_target
+    shape_dir <- withr::local_tempdir()
+    utils::unzip(shape_zip, exdir = shape_dir)
+    shapes <- sf::st_read(file.path(shape_dir, "target.gpkg"), quiet = TRUE)
+    expect_equal(nrow(shapes), nrow(target))
+    expect_true(all(c("src_source_attr_10", "tgt_target_attr_5") %in% names(shapes)))
+  })
 })
 
 test_that("target.gpkg round-trips target geometry with merged attributes", {

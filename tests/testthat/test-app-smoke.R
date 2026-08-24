@@ -101,6 +101,16 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   expect_true(app$get_js(
     "document.querySelector('#build_btn_ui button').disabled"
   ))
+
+  # The map is rendered before any preview and can later be hidden by the Data
+  # tab. The client hook must re-measure Leaflet after the tab becomes visible
+  # so feature panes are not retained outside the visible map viewport.
+  app_impl <- paste(
+    readLines(file.path(dirname(shiny_app_file()), "app_impl.R"), warn = FALSE),
+    collapse = "\n"
+  )
+  expect_match(app_impl, "invalidateSize", fixed = TRUE)
+  expect_match(app_impl, "shown.bs.tab", fixed = TRUE)
 })
 
 # The map renders at app load with its furniture layers (the

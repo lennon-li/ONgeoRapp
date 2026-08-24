@@ -77,12 +77,52 @@ source_choices_grouped <- function() {
   groups[lengths(groups) > 0]
 }
 
-target_choices_grouped <- function() {
+target_choices_grouped <- function(include_open_postal = TRUE) {
   sources <- ONgeoR::list_sources()
   sources <- sources[sources$geography_type == "facility", ]
+  if (!isTRUE(include_open_postal)) {
+    sources <- sources[sources$source_id != "postal_points", , drop = FALSE]
+  }
   labels <- source_choice_labels(sources)
   points <- stats::setNames(sources$source_id, labels)
   list("Points" = c(points, "Upload postal codes" = "postal_upload"))
+}
+
+# `overlay_source` remains the internal layer id used throughout the app. The
+# mode is a separate UI concern so an uploaded file can never compete with a
+# registry selection in the same target slot.
+target_input_mode <- function(input) {
+  mode <- input$overlay_target_mode
+  if (!is.null(mode) && nzchar(mode)) return(mode)
+  if (isTRUE(input$overlay_upload_own)) return("own_file")
+  if (identical(input$overlay_source, "postal_upload")) return("postal_upload")
+  if (identical(input$overlay_source, "postal_points")) return("open_postal")
+  "registry"
+}
+
+target_layer_display_name <- function(target_id, own_file = NULL) {
+  if (is.null(target_id) || !nzchar(target_id)) return("Target layer")
+  if (identical(target_id, "postal_upload")) return("Uploaded postal codes")
+  if (identical(target_id, "custom_target")) {
+    if (!is.null(own_file) && nzchar(own_file$name %||% "")) {
+      return(own_file$name)
+    }
+    return("Uploaded target file")
+  }
+  tryCatch(
+    ONgeoR::get_source(target_id)$name,
+    error = function(e) target_id
+  )
+}
+
+source_layer_display_name <- function(source_id) {
+  if (is.null(source_id) || !nzchar(source_id)) return("Source layer")
+  if (identical(source_id, "postal_upload")) return("Uploaded postal codes")
+  if (identical(source_id, "custom_target")) return("Uploaded target file")
+  tryCatch(
+    ONgeoR::get_source(source_id)$name,
+    error = function(e) source_id
+  )
 }
 
 # Removes `exclude_id` from whichever group of a grouped-choices list
@@ -106,7 +146,9 @@ first_choice_grouped <- function(groups) {
 # Maps a source's registry geography_type to a small geometry kind token used
 # to drive the per-layer style controls and the relationship line.
 geom_kind <- function(source_id) {
-  if (identical(source_id, "postal_upload")) return("point")
+  if (source_id %in% c("postal_upload", "postal_points", "custom_target")) {
+    return("point")
+  }
   switch(ONgeoR::get_source(source_id)$geography_type,
     boundary = "polygon",
     facility = "point",
@@ -126,7 +168,7 @@ layer_geom <- function(layer) {
 
 # Colored badge descriptor for a source's registry geography_type.
 source_geom_label <- function(source_id) {
-  if (identical(source_id, "postal_upload")) {
+  if (source_id %in% c("postal_upload", "postal_points", "custom_target")) {
     return(list(text = "Point", class = "geo-point"))
   }
   gt <- ONgeoR::get_source(source_id)$geography_type
@@ -180,11 +222,11 @@ result_column_width <- function(source_sf, target_sf, kinds) {
   if ("raster" %in% kinds) {
     return(NA_integer_)
   }
+  n_attr <- function(layer) max(ncol(layer) - 1L, 0L)
   if (all(kinds == "polygon") || all(kinds == "point")) {
-    n_attr <- function(layer) max(ncol(layer) - 1L, 0L)
     return(17L + n_attr(source_sf) + n_attr(target_sf))
   }
-  crosswalk_result_columns
+  crosswalk_result_columns + n_attr(source_sf) + n_attr(target_sf)
 }
 
 # Human-readable "N features x M attributes" for a retrieved layer. Attributes
@@ -211,16 +253,8 @@ layer_dimensions <- function(layer) {
 # dimensions can be quoted here rather than described in the abstract.
 join_confirm_modal <- function(source_id, target_id, source_sf, target_sf,
                                kinds) {
-  source_name <- if (identical(source_id, "postal_upload")) {
-    "Uploaded postal codes"
-  } else {
-    ONgeoR::get_source(source_id)$name
-  }
-  target_name <- if (identical(target_id, "postal_upload")) {
-    "Uploaded postal codes"
-  } else {
-    ONgeoR::get_source(target_id)$name
-  }
+  source_name <- source_layer_display_name(source_id)
+  target_name <- target_layer_display_name(target_id)
   is_raster <- inherits(target_sf, "SpatRaster") ||
     inherits(source_sf, "SpatRaster")
   n_target <- if (inherits(target_sf, "SpatRaster")) NA_integer_ else nrow(target_sf)
@@ -434,6 +468,86 @@ read_uploaded_file <- function(name, datapath) {
     NULL)
 }
 
+# Read and validate a user-supplied target. Custom targets are deliberately
+# narrower than registry targets: only non-empty point vectors with a CRS are
+# safe to pass to the point-first target workflow. The returned list keeps
+# validation errors available to the UI instead of turning an upload failure
+# into an opaque async-task error.
+read_uploaded_point_vector <- function(name, datapath) {
+  ext <- tolower(tools::file_ext(name))
+  raster_exts <- c("tif", "tiff", "img", "grd", "nc")
+  if (ext %in% raster_exts) {
+    return(list(
+      sf = NULL,
+      error = "Raster files are not supported for a custom target. Upload a point vector file."
+    ))
+  }
+  if (!ext %in% c("geojson", "json", "gpkg", "shp", "zip")) {
+    return(list(
+      sf = NULL,
+      error = "Unsupported target file type. Upload GeoJSON, GeoPackage, or a zipped shapefile containing points."
+    ))
+  }
+
+  temp_dir <- NULL
+  path <- datapath
+  if (identical(ext, "zip")) {
+    temp_dir <- tempfile("ongeor_target_")
+    dir.create(temp_dir)
+    on.exit(unlink(temp_dir, recursive = TRUE, force = TRUE), add = TRUE)
+    extracted <- tryCatch(
+      utils::unzip(datapath, exdir = temp_dir),
+      error = function(e) e
+    )
+    if (inherits(extracted, "error")) {
+      return(list(sf = NULL, error = paste("Could not read the uploaded ZIP:", conditionMessage(extracted))))
+    }
+    candidates <- list.files(
+      temp_dir, recursive = TRUE, full.names = TRUE,
+      pattern = "\\.(geojson|json|gpkg|shp)$", ignore.case = TRUE
+    )
+    if (length(candidates) == 0L) {
+      return(list(
+        sf = NULL,
+        error = "The ZIP contains no supported point-vector file. Include a GeoJSON, GeoPackage, or shapefile."
+      ))
+    }
+    path <- candidates[[1]]
+  }
+
+  layer <- tryCatch(
+    sf::st_read(path, quiet = TRUE),
+    error = function(e) e
+  )
+  if (inherits(layer, "error")) {
+    return(list(sf = NULL, error = paste("Could not read the target file:", conditionMessage(layer))))
+  }
+  if (!inherits(layer, "sf")) {
+    return(list(sf = NULL, error = "The uploaded file is not a vector layer."))
+  }
+  if (nrow(layer) == 0L) {
+    return(list(sf = NULL, error = "The uploaded target contains no features."))
+  }
+  geometry_types <- unique(as.character(sf::st_geometry_type(layer)))
+  if (!all(geometry_types %in% c("POINT", "MULTIPOINT"))) {
+    return(list(
+      sf = NULL,
+      error = "Custom targets must contain point features only; polygons and other geometry types are not supported."
+    ))
+  }
+  empty <- sf::st_is_empty(layer)
+  if (any(empty)) {
+    return(list(sf = NULL, error = "The uploaded target contains empty point geometries."))
+  }
+  if (is.na(sf::st_crs(layer))) {
+    return(list(
+      sf = NULL,
+      error = "The uploaded target has no coordinate reference system. Assign a CRS and upload it again."
+    ))
+  }
+  list(sf = layer, error = NULL)
+}
+
 # Renders real (clickable) downloadButtons when an item's `ready` field is
 # TRUE, otherwise visually-matching but non-functional disabled buttons - so
 # each sidebar download is only ever clickable once the map/data it points to
@@ -497,8 +611,8 @@ collapse_crosswalk_best_match <- function(crosswalk) {
     return(crosswalk)
   }
   ids <- as.character(crosswalk$from_id)
-  coverage <- if (!is.null(crosswalk$coverage)) crosswalk$coverage else rep(NA_real_, n)
-  distance <- if (!is.null(crosswalk$match_distance_km)) {
+  coverage <- if ("coverage" %in% names(crosswalk)) crosswalk$coverage else rep(NA_real_, n)
+  distance <- if ("match_distance_km" %in% names(crosswalk)) {
     crosswalk$match_distance_km
   } else {
     rep(NA_real_, n)
@@ -521,6 +635,92 @@ collapse_crosswalk_best_match <- function(crosswalk) {
   }
   # sort() restores original row order of the winning rows; deterministic.
   crosswalk[sort(keep), , drop = FALSE]
+}
+
+# `build_crosswalk()` intentionally returns a compact public assignment schema.
+# The app's mixed point/boundary path needs the feature attributes as well, so
+# enrich that result here without changing ONgeoR's public function. The app's
+# direction convention is `from = target` and `to = source`; the id-column
+# fields in the crosswalk are therefore used to recover the corresponding
+# rows from the retrieved layers.
+#
+# The result is aligned to the target layer rather than to the pair table:
+# duplicate matches are reduced using the same deterministic winner used by
+# the shape export, and targets absent from the crosswalk remain as unmatched
+# rows with their target attributes and NA source attributes.
+normalize_mixed_crosswalk <- function(crosswalk, source_sf, target_sf) {
+  if (is.null(crosswalk) || !inherits(source_sf, "sf") ||
+      !inherits(target_sf, "sf") || nrow(crosswalk) == 0L) {
+    return(crosswalk)
+  }
+  if (identical(layer_geom(source_sf), layer_geom(target_sf))) {
+    return(crosswalk)
+  }
+  if (!"from_id" %in% names(crosswalk)) {
+    return(crosswalk)
+  }
+
+  source_data <- sf::st_drop_geometry(source_sf)
+  target_data <- sf::st_drop_geometry(target_sf)
+  id_from_crosswalk <- function(table, column, fallback, data) {
+    value <- if (column %in% names(table)) table[[column]][1L] else NA_character_
+    if (is.na(value) || !nzchar(as.character(value)) ||
+        !as.character(value) %in% names(data)) {
+      value <- fallback
+    }
+    value
+  }
+  target_id_col <- id_from_crosswalk(
+    crosswalk, "from_id_col", ONgeoR::layer_id_col(target_sf), target_data
+  )
+  source_id_col <- id_from_crosswalk(
+    crosswalk, "to_id_col", ONgeoR::layer_id_col(source_sf), source_data
+  )
+
+  collapsed <- collapse_crosswalk_best_match(crosswalk)
+  target_ids <- as.character(target_data[[target_id_col]])
+  aligned <- collapsed[match(target_ids, as.character(collapsed$from_id)), , drop = FALSE]
+  aligned <- as.data.frame(aligned, stringsAsFactors = FALSE, check.names = FALSE)
+  aligned$from_id <- target_ids
+  if (!"from_id_col" %in% names(aligned)) {
+    aligned$from_id_col <- target_id_col
+  } else {
+    aligned$from_id_col[] <- target_id_col
+  }
+  if (!"to_id_col" %in% names(aligned)) {
+    aligned$to_id_col <- source_id_col
+  } else {
+    aligned$to_id_col[] <- source_id_col
+  }
+
+  # Fill the target-side descriptive fields for an unmatched target when the
+  # compact crosswalk omitted that feature entirely. Existing match and
+  # provenance values are left untouched.
+  target_name_col <- tryCatch(ONgeoR::layer_name_col(target_sf), error = function(e) NULL)
+  if (!is.null(target_name_col) && target_name_col %in% names(target_data)) {
+    target_names <- as.character(target_data[[target_name_col]])
+    if (!"from_name" %in% names(aligned)) {
+      aligned$from_name <- target_names
+    } else {
+      missing_name <- is.na(aligned$from_name) | !nzchar(as.character(aligned$from_name))
+      aligned$from_name[missing_name] <- target_names[missing_name]
+    }
+  }
+
+  source_ids <- as.character(source_data[[source_id_col]])
+  source_index <- if ("to_id" %in% names(aligned)) {
+    match(as.character(aligned$to_id), source_ids)
+  } else {
+    rep(NA_integer_, nrow(aligned))
+  }
+  source_attrs <- source_data[source_index, , drop = FALSE]
+  target_attrs <- target_data
+  names(source_attrs) <- paste0("src_", names(source_attrs))
+  names(target_attrs) <- paste0("tgt_", names(target_attrs))
+  rownames(aligned) <- NULL
+  rownames(source_attrs) <- NULL
+  rownames(target_attrs) <- NULL
+  cbind(aligned, source_attrs, target_attrs)
 }
 
 # link() returns one row per sampled cell or point, so a polygon target would
@@ -1086,10 +1286,12 @@ add_furniture_layer <- function(map, layer, group) {
 # reference layers, drawn in the fixed furniture style and appended after
 # the styled source layers so furniture always sits at the bottom of the
 # overlay list.
-render_styled_map <- function(layers, styles, add_control = TRUE, furniture = list()) {
+render_styled_map <- function(layers, styles, add_control = TRUE,
+                              furniture = list(), layer_labels = NULL) {
   map <- base_leaflet_layers(leaflet::leaflet())
   for (nm in names(layers)) {
-    map <- add_styled_sf_layer(map, layers[[nm]], nm, styles[[nm]])
+    display_name <- layer_labels[[nm]] %||% nm
+    map <- add_styled_sf_layer(map, layers[[nm]], display_name, styles[[nm]])
   }
   for (nm in names(furniture)) {
     map <- add_furniture_layer(map, furniture[[nm]], nm)
@@ -1111,7 +1313,10 @@ render_styled_map <- function(layers, styles, add_control = TRUE, furniture = li
     # names() on an empty list is NULL, and c(NULL, NULL) stays NULL, which
     # leaflet renders as a single checkbox labelled "null". Normalise to
     # character(0) so an empty overlay set produces no overlay entries.
-    overlay_groups <- c(names(layers), names(furniture))
+    overlay_groups <- unname(c(
+      vapply(names(layers), function(nm) layer_labels[[nm]] %||% nm, character(1)),
+      names(furniture)
+    ))
     if (is.null(overlay_groups)) {
       overlay_groups <- character(0)
     }
@@ -1125,8 +1330,12 @@ render_styled_map <- function(layers, styles, add_control = TRUE, furniture = li
   map
 }
 
-add_nearest_connectors <- function(map, layers, connectors, conn_style, furniture = list()) {
-  overlay_groups <- c(names(layers), names(furniture))
+add_nearest_connectors <- function(map, layers, connectors, conn_style,
+                                   furniture = list(), layer_labels = NULL) {
+  overlay_groups <- c(
+    vapply(names(layers), function(nm) layer_labels[[nm]] %||% nm, character(1)),
+    names(furniture)
+  )
   if (!is.null(connectors) && nrow(connectors) > 0) {
     map <- leaflet::addPolylines(
       map,
@@ -1193,18 +1402,28 @@ ui <- bslib::page_fillable(
       tags$div(class = "sidebar-brand",
         tags$img(src = "logo.png", alt = "ONgeoR")),
       tags$div(class = "slot-block slot-overlay",
-        selectInput("overlay_source", "1. Target layer (points)", choices = target_choices_grouped(), selected = "moh_service_locations"),
+        radioButtons("overlay_target_mode", "1. Target input",
+          choices = c(
+            "Registry layer" = "registry",
+            "Uploaded postal codes" = "postal_upload",
+            "Use my own file" = "own_file"
+          ),
+          selected = "registry"),
+        conditionalPanel(
+          "input.overlay_target_mode == 'registry'",
+          selectInput("overlay_source", "Target layer (points)",
+            choices = target_choices_grouped(include_open_postal = TRUE),
+            selected = "moh_service_locations")
+        ),
         tags$div(class = "slot-meta",
-          uiOutput("overlay_geom_badge"),
-          checkboxInput("overlay_upload_own", "Use my own file", FALSE)
+          uiOutput("overlay_geom_badge")
         ),
         conditionalPanel(
-          "input.overlay_upload_own",
-          fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
-            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-          selectInput("overlay_own_type", "Layer type",
-            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
+          "input.overlay_target_mode == 'own_file'",
+          fileInput("overlay_own_file", "Point target file", buttonLabel = "Browse...",
+            accept = c(".geojson", ".json", ".gpkg", ".shp", ".zip"),
+            placeholder = "GeoJSON, GeoPackage, or zipped shapefile"),
+          uiOutput("overlay_own_status_ui")
         ),
         uiOutput("postal_upload_ui")
       ),
@@ -1212,16 +1431,7 @@ ui <- bslib::page_fillable(
         selectInput("base_layer", "2. Source layer to join from", choices = source_choices_grouped(), selected = "phu_boundaries"),
         uiOutput("census_window_ui"),
         tags$div(class = "slot-meta",
-          uiOutput("base_geom_badge"),
-          checkboxInput("base_upload_own", "Use my own file", FALSE)
-        ),
-        conditionalPanel(
-          "input.base_upload_own",
-          fileInput("base_own_file", NULL, buttonLabel = "Browse...",
-            placeholder = "GeoJSON, GeoPackage, zipped shapefile, or GeoTIFF"),
-          selectInput("base_own_type", "Layer type",
-            c("Polygon" = "polygon", "Point" = "point", "Raster" = "raster")),
-          tags$p(class = "text-muted", "Upload support is coming soon - this does not affect linking yet.")
+          uiOutput("base_geom_badge")
         )
       ),
       uiOutput("link_relationship"),
@@ -1276,7 +1486,7 @@ server <- function(input, output, session) {
 
   preview_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                      generation,
-                                                     postal_layer = NULL,
+                                                     overlay_layer = NULL,
                                                      progress_path = NULL,
                                                      bbox = NULL) {
     promises::future_promise({
@@ -1312,7 +1522,7 @@ server <- function(input, output, session) {
       })
       base_sf    <- fetch(base_id)
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
+      overlay_sf <- if (!is.null(overlay_layer)) overlay_layer else fetch(overlay_id)
       note("Preparing layers for the map...")
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
@@ -1323,7 +1533,7 @@ server <- function(input, output, session) {
 
   build_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                    generation,
-                                                   postal_layer = NULL,
+                                                   overlay_layer = NULL,
                                                    progress_path = NULL,
                                                    bbox = NULL) {
     promises::future_promise({
@@ -1357,7 +1567,7 @@ server <- function(input, output, session) {
       })
       base_sf    <- fetch(base_id)
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(postal_layer)) postal_layer else fetch(overlay_id)
+      overlay_sf <- if (!is.null(overlay_layer)) overlay_layer else fetch(overlay_id)
       note("Joining layers...")
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
@@ -1431,8 +1641,46 @@ server <- function(input, output, session) {
 
   # --- Layer pickers & preview ---------------------------------------
 
+  # Keep the hidden internal target id synchronized with the explicit target
+  # mode. Registry/open-postal/uploaded-postal/custom-file are mutually
+  # exclusive by construction; switching mode also resets the prior source
+  # selection so a stale postal upload or custom file cannot be submitted.
+  observeEvent(input$overlay_target_mode, {
+    mode <- target_input_mode(input)
+    if (identical(mode, "registry")) {
+      groups <- remove_choice_grouped(
+        target_choices_grouped(include_open_postal = TRUE), input$base_layer
+      )
+      updateSelectInput(
+        session, "overlay_source", choices = groups,
+        selected = if (input$overlay_source %in% unlist(groups)) {
+          input$overlay_source
+        } else {
+          first_choice_grouped(groups)
+        }
+      )
+    } else {
+      selected <- switch(mode,
+        open_postal = "postal_points",
+        postal_upload = "postal_upload",
+        own_file = "custom_target",
+        NULL)
+      labels <- switch(mode,
+        open_postal = "Open postal codes",
+        postal_upload = "Uploaded postal codes",
+        own_file = "Uploaded point target",
+        "Target layer")
+      updateSelectInput(session, "overlay_source",
+        choices = stats::setNames(selected, labels), selected = selected)
+    }
+  }, ignoreInit = TRUE)
+
   observeEvent(input$base_layer, {
-    groups <- remove_choice_grouped(target_choices_grouped(), input$base_layer)
+    if (identical(target_input_mode(input), "own_file")) return()
+    include_open <- TRUE
+    groups <- remove_choice_grouped(
+      target_choices_grouped(include_open_postal = include_open), input$base_layer
+    )
     selected <- if (input$overlay_source %in% unlist(groups)) {
       input$overlay_source
     } else {
@@ -1442,6 +1690,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(input$overlay_source, {
+    if (identical(target_input_mode(input), "own_file")) return()
     groups <- remove_choice_grouped(source_choices_grouped(), input$overlay_source)
     selected <- if (input$base_layer %in% unlist(groups)) {
       input$base_layer
@@ -1568,8 +1817,52 @@ server <- function(input, output, session) {
     )
   })
 
+  own_target_result <- reactive({
+    file <- input$overlay_own_file
+    if (is.null(file) || !nzchar(file$datapath %||% "")) {
+      return(list(sf = NULL, error = "Choose a point vector file to use as the target."))
+    }
+    read_uploaded_point_vector(file$name, file$datapath)
+  })
+
+  output$overlay_own_status_ui <- renderUI({
+    result <- own_target_result()
+    if (!is.null(result$error)) {
+      return(tags$p(class = "text-danger", result$error))
+    }
+    tags$p(class = "text-success",
+      sprintf("Ready: %s point features.", format(nrow(result$sf), big.mark = ",")))
+  })
+
+  overlay_request <- reactive({
+    mode <- target_input_mode(input)
+    if (identical(mode, "own_file")) {
+      result <- own_target_result()
+      return(list(id = "custom_target", layer = result$sf, error = result$error))
+    }
+    if (identical(mode, "postal_upload")) {
+      if (is.null(input$postal_file) || is.null(input$postal_column) ||
+          !nzchar(input$postal_column)) {
+        return(list(
+          id = "postal_upload", layer = NULL,
+          error = "Upload postal codes and select a valid postal code column first."
+        ))
+      }
+      result <- postal_result()
+      if (is.null(result) || is.null(result$sf)) {
+        return(list(
+          id = "postal_upload", layer = NULL,
+          error = "Upload postal codes and select a valid postal code column first."
+        ))
+      }
+      return(list(id = "postal_upload", layer = result$sf, error = NULL))
+    }
+    id <- if (identical(mode, "open_postal")) "postal_points" else input$overlay_source
+    list(id = id, layer = NULL, error = NULL)
+  })
+
   observeEvent(list(input$postal_file, input$postal_column), {
-    if (identical(input$overlay_source, "postal_upload")) {
+    if (identical(target_input_mode(input), "postal_upload")) {
       preview_generation(preview_generation() + 1L)
       link_generation(link_generation() + 1L)
       cw_result$crosswalk <- NULL
@@ -1582,7 +1875,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$postal_upload_ui <- renderUI({
-    req(identical(input$overlay_source, "postal_upload"))
+    req(identical(target_input_mode(input), "postal_upload"))
     tagList(
       fileInput("postal_file", "Upload postal codes",
         accept = c(".csv", ".xlsx", ".xls"),
@@ -1932,11 +2225,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$preview_btn, {
     req(input$base_layer, input$overlay_source)
-    postal_layer <- NULL
-    if (identical(input$overlay_source, "postal_upload")) {
-      pr <- postal_result()
-      req(pr, pr$sf)
-      postal_layer <- pr$sf
+    target <- overlay_request()
+    if (!is.null(target$error) || is.null(target$layer) &&
+        target$id %in% c("postal_upload", "custom_target")) {
+      showNotification(target$error %||% "The target layer is not ready.",
+        type = "error", duration = NULL)
+      return()
     }
     generation <- preview_generation()
     preview_active_generation(generation)
@@ -1946,7 +2240,7 @@ server <- function(input, output, session) {
     preview_state("running")
     preview_state_detail("Starting.")
     preview_task$invoke(input$base_layer, input$overlay_source, generation,
-      postal_layer, path, requested_bbox())
+      target$layer, path, requested_bbox())
   })
 
   observeEvent(preview_task$status(), {
@@ -2041,11 +2335,13 @@ server <- function(input, output, session) {
       base_layer = input$base_layer,
       overlay_source = input$overlay_source
     )
-    postal_layer <- NULL
-    if (identical(input$overlay_source, "postal_upload")) {
-      pr <- postal_result()
-      req(pr, pr$sf)
-      postal_layer <- pr$sf
+    target <- overlay_request()
+    if (!is.null(target$error) || is.null(target$layer) &&
+        target$id %in% c("postal_upload", "custom_target")) {
+      removeModal()
+      showNotification(target$error %||% "The target layer is not ready.",
+        type = "error", duration = NULL)
+      return()
     }
     has_current_result <- !is.null(cw_result$crosswalk) ||
       !is.null(cw_result$linked)
@@ -2073,17 +2369,11 @@ server <- function(input, output, session) {
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
-    postal_layer <- NULL
-    if (identical(input$overlay_source, "postal_upload")) {
-      pr <- postal_result()
-      req(pr, pr$sf)
-      postal_layer <- pr$sf
-    }
     build_task$invoke(
       input$base_layer,
       input$overlay_source,
       generation,
-      postal_layer,
+      target$layer,
       isolate(link_progress_path()),
       requested_bbox()
     )
@@ -2116,11 +2406,15 @@ server <- function(input, output, session) {
       return()
     }
     if (!identical(result$generation, link_generation())) return()
-    cw_result$crosswalk   <- result$crosswalk
+    base_sf <- unpack_spatial(result$base_sf)
+    overlay_sf <- unpack_spatial(result$overlay_sf)
+    cw_result$crosswalk <- normalize_mixed_crosswalk(
+      result$crosswalk, base_sf, overlay_sf
+    )
     cw_result$linked      <- result$linked
     cw_result$pairs       <- result$pairs
-    cw_result$base_sf     <- unpack_spatial(result$base_sf)
-    cw_result$overlay_sf  <- unpack_spatial(result$overlay_sf)
+    cw_result$base_sf     <- base_sf
+    cw_result$overlay_sf  <- overlay_sf
     link_state("completed")
     link_state_detail("Results and downloads are ready.")
     bslib::nav_show("main_tabs", "data", session = session)
@@ -2135,6 +2429,12 @@ server <- function(input, output, session) {
   link_map <- reactive({
     layers <- list()
     styles <- list()
+    layer_labels <- c(
+      "Source layer" = source_layer_display_name(input$base_layer),
+      "Target layer" = target_layer_display_name(
+        input$overlay_source, input$overlay_own_file
+      )
+    )
     if (!is.null(cw_result$base_sf) && !is.null(cw_result$overlay_sf)) {
       layers <- list("Source layer" = cw_result$base_sf, "Target layer" = cw_result$overlay_sf)
       styles <- list(
@@ -2156,12 +2456,16 @@ server <- function(input, output, session) {
     map <- render_styled_map(
       layers, styles,
       add_control = !nearest_run,
-      furniture = furniture
+      furniture = furniture,
+      layer_labels = layer_labels
     )
     if (nearest_run) {
       connectors <- nearest_connectors(cw_result$base_sf, cw_result$overlay_sf, cw_result$pairs)
       conn_style <- list(color = "#52514e", weight = 1, opacity = 0.7)
-      map <- add_nearest_connectors(map, layers, connectors, conn_style, furniture = furniture)
+      map <- add_nearest_connectors(
+        map, layers, connectors, conn_style, furniture = furniture,
+        layer_labels = layer_labels
+      )
     }
     ontario <- sf::st_bbox(furniture_layer("PHU_simple"))
     # Ontario's full bbox runs up to Hudson Bay, so fitting it exactly leaves
@@ -2191,6 +2495,27 @@ server <- function(input, output, session) {
   output$cw_map <- renderLeaflet({
     htmlwidgets::onRender(link_map(), "
       function(el, x) {
+        var map = this;
+        var resizeMap = function() {
+          if (!el || el.offsetParent === null || !map || !map.invalidateSize) return;
+          map.invalidateSize({pan: false, animate: false});
+        };
+        // The widget is initially rendered while the Map tab is visible, but
+        // it can be hidden while Data is active. Leaflet measures a hidden
+        // container as zero-sized and then retains that measurement when the
+        // tab is shown again, which makes the tile pane appear while the
+        // feature panes are outside the visible map. Re-measure after the
+        // Bootstrap tab transition and after a window resize. The handler is
+        // scoped to this widget element so a re-render cannot register it
+        // twice on the same node.
+        if (!el.__ongeorMapLifecycleBound) {
+          el.__ongeorMapLifecycleBound = true;
+          document.addEventListener('shown.bs.tab', resizeMap);
+          window.addEventListener('resize', resizeMap);
+        }
+        requestAnimationFrame(function() {
+          setTimeout(resizeMap, 0);
+        });
         requestAnimationFrame(function() {
           setTimeout(function() {
             if (window.Shiny && Shiny.setInputValue) {
