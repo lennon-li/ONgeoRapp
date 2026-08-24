@@ -73,14 +73,19 @@ test_that("custom target validation accepts points and rejects other inputs", {
   sf::st_write(points, point_file, quiet = TRUE, delete_dsn = TRUE)
   sf::st_write(polygons, polygon_file, quiet = TRUE, delete_dsn = TRUE)
 
-  expect_s3_class(env$read_uploaded_point_vector("points.geojson", point_file)$sf, "sf")
-  polygon_result <- env$read_uploaded_point_vector("polygons.geojson", polygon_file)
-  expect_null(polygon_result$sf)
-  expect_match(polygon_result$error, "point|polygon", ignore.case = TRUE)
+  points_result <- env$read_uploaded_layer("points.geojson", point_file)
+  expect_s3_class(points_result, "sf")
+  expect_error(
+    env$read_uploaded_layer("polygons.geojson", polygon_file),
+    "point|polygon",
+    ignore.case = TRUE
+  )
 
-  raster_result <- env$read_uploaded_point_vector("target.tif", point_file)
-  expect_null(raster_result$sf)
-  expect_match(raster_result$error, "Raster", ignore.case = TRUE)
+  expect_error(
+    env$read_uploaded_layer("target.tif", point_file),
+    "Unsupported file type",
+    ignore.case = TRUE
+  )
 })
 
 test_that("source selections update geometry and relationship displays", {

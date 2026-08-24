@@ -126,43 +126,6 @@ target_choices_grouped <- function(include_open_postal = TRUE) {
   list("Points" = c(points, "Upload postal codes" = "postal_upload"))
 }
 
-# `overlay_source` remains the internal layer id used throughout the app. The
-# mode is a separate UI concern so an uploaded file can never compete with a
-# registry selection in the same target slot.
-target_input_mode <- function(input) {
-  mode <- input$overlay_target_mode
-  if (!is.null(mode) && nzchar(mode)) return(mode)
-  if (isTRUE(input$overlay_upload_own)) return("own_file")
-  if (identical(input$overlay_source, "postal_upload")) return("postal_upload")
-  if (identical(input$overlay_source, "postal_points")) return("open_postal")
-  "registry"
-}
-
-target_layer_display_name <- function(target_id, own_file = NULL) {
-  if (is.null(target_id) || !nzchar(target_id)) return("Target layer")
-  if (identical(target_id, "postal_upload")) return("Uploaded postal codes")
-  if (identical(target_id, "custom_target")) {
-    if (!is.null(own_file) && nzchar(own_file$name %||% "")) {
-      return(own_file$name)
-    }
-    return("Uploaded target file")
-  }
-  tryCatch(
-    ONgeoR::get_source(target_id)$name,
-    error = function(e) target_id
-  )
-}
-
-source_layer_display_name <- function(source_id) {
-  if (is.null(source_id) || !nzchar(source_id)) return("Source layer")
-  if (identical(source_id, "postal_upload")) return("Uploaded postal codes")
-  if (identical(source_id, "custom_target")) return("Uploaded target file")
-  tryCatch(
-    ONgeoR::get_source(source_id)$name,
-    error = function(e) source_id
-  )
-}
-
 # Removes `exclude_id` from whichever group of a grouped-choices list
 # contains it, then drops any group left empty - used by the mutual-exclusion
 # observers so the two source pickers can never hold the same value while
@@ -1758,19 +1721,8 @@ ui <- bslib::page_fillable(
       tags$div(class = "sidebar-brand",
         tags$img(src = "logo.png", alt = "ONgeoR")),
       tags$div(class = "slot-block slot-overlay",
-        radioButtons("overlay_target_mode", "1. Target input",
-          choices = c(
-            "Registry layer" = "registry",
-            "Uploaded postal codes" = "postal_upload",
-            "Use my own file" = "own_file"
-          ),
-          selected = "registry"),
-        conditionalPanel(
-          "input.overlay_target_mode == 'registry'",
-          selectInput("overlay_source", "Target layer (points)",
-            choices = target_choices_grouped(include_open_postal = TRUE),
-            selected = "moh_service_locations")
-        ),
+        selectInput("overlay_source", "1. Target layer (points)",
+          choices = target_choices_grouped(), selected = "moh_service_locations"),
         tags$div(class = "slot-meta",
           uiOutput("overlay_geom_badge"),
           # An own-file upload and the postal-code dropdown both REPLACE the
@@ -2087,65 +2039,6 @@ server <- function(input, output, session) {
 
   # --- Layer pickers & preview ---------------------------------------
 
-  # Keep the hidden internal target id synchronized with the explicit target
-  # mode. Registry/open-postal/uploaded-postal/custom-file are mutually
-  # exclusive by construction; switching mode also resets the prior source
-  # selection so a stale postal upload or custom file cannot be submitted.
-  observeEvent(input$overlay_target_mode, {
-    mode <- target_input_mode(input)
-    if (identical(mode, "registry")) {
-      groups <- remove_choice_grouped(
-        target_choices_grouped(include_open_postal = TRUE), input$base_layer
-      )
-      updateSelectInput(
-        session, "overlay_source", choices = groups,
-        selected = if (input$overlay_source %in% unlist(groups)) {
-          input$overlay_source
-        } else {
-          first_choice_grouped(groups)
-        }
-      )
-    } else {
-      selected <- switch(mode,
-        open_postal = "postal_points",
-        postal_upload = "postal_upload",
-        own_file = "custom_target",
-        NULL)
-      labels <- switch(mode,
-        open_postal = "Open postal codes",
-        postal_upload = "Uploaded postal codes",
-        own_file = "Uploaded point target",
-        "Target layer")
-      updateSelectInput(session, "overlay_source",
-        choices = stats::setNames(selected, labels), selected = selected)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$base_layer, {
-    if (identical(target_input_mode(input), "own_file")) return()
-    include_open <- TRUE
-    groups <- remove_choice_grouped(
-      target_choices_grouped(include_open_postal = include_open), input$base_layer
-    )
-    selected <- if (input$overlay_source %in% unlist(groups)) {
-      input$overlay_source
-    } else {
-      first_choice_grouped(groups)
-    }
-    updateSelectInput(session, "overlay_source", choices = groups, selected = selected)
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$overlay_source, {
-    if (identical(target_input_mode(input), "own_file")) return()
-    groups <- remove_choice_grouped(source_choices_grouped(), input$overlay_source)
-    selected <- if (input$base_layer %in% unlist(groups)) {
-      input$base_layer
-    } else {
-      first_choice_grouped(groups)
-    }
-    updateSelectInput(session, "base_layer", choices = groups, selected = selected)
-  }, ignoreInit = TRUE)
-
   # Geometry-type feedback badges, reactive the moment a picker changes.
   output$base_geom_badge <- renderUI({
     req(input$base_layer)
@@ -2383,77 +2276,6 @@ server <- function(input, output, session) {
       n_unmatched = n_input - n_placed,
       n_geonames = n_geonames,
       error = if (is.null(postal_error)) NULL else describe_retrieval_failure(postal_error)
-    )
-  })
-
-  own_target_result <- reactive({
-    file <- input$overlay_own_file
-    if (is.null(file) || !nzchar(file$datapath %||% "")) {
-      return(list(sf = NULL, error = "Choose a point vector file to use as the target."))
-    }
-    read_uploaded_point_vector(file$name, file$datapath)
-  })
-
-  output$overlay_own_status_ui <- renderUI({
-    result <- own_target_result()
-    if (!is.null(result$error)) {
-      return(tags$p(class = "text-danger", result$error))
-    }
-    tags$p(class = "text-success",
-      sprintf("Ready: %s point features.", format(nrow(result$sf), big.mark = ",")))
-  })
-
-  overlay_request <- reactive({
-    mode <- target_input_mode(input)
-    if (identical(mode, "own_file")) {
-      result <- own_target_result()
-      return(list(id = "custom_target", layer = result$sf, error = result$error))
-    }
-    if (identical(mode, "postal_upload")) {
-      if (is.null(input$postal_file) || is.null(input$postal_column) ||
-          !nzchar(input$postal_column)) {
-        return(list(
-          id = "postal_upload", layer = NULL,
-          error = "Upload postal codes and select a valid postal code column first."
-        ))
-      }
-      result <- postal_result()
-      if (is.null(result) || is.null(result$sf)) {
-        return(list(
-          id = "postal_upload", layer = NULL,
-          error = "Upload postal codes and select a valid postal code column first."
-        ))
-      }
-      return(list(id = "postal_upload", layer = result$sf, error = NULL))
-    }
-    id <- if (identical(mode, "open_postal")) "postal_points" else input$overlay_source
-    list(id = id, layer = NULL, error = NULL)
-  })
-
-  observeEvent(list(input$postal_file, input$postal_column), {
-    if (identical(target_input_mode(input), "postal_upload")) {
-      preview_generation(preview_generation() + 1L)
-      link_generation(link_generation() + 1L)
-      cw_result$crosswalk <- NULL
-      cw_result$linked <- NULL
-      cw_result$pairs <- NULL
-      cw_result$base_sf <- NULL
-      cw_result$overlay_sf <- NULL
-      cw_result$previewed <- NULL
-      previewed_bbox(NULL)
-      session$sendCustomMessage("ongeor-data-tab", TRUE)
-    }
-  }, ignoreInit = TRUE)
-
-  output$postal_upload_ui <- renderUI({
-    req(identical(target_input_mode(input), "postal_upload"))
-    tagList(
-      fileInput("postal_file", "Upload postal codes",
-        accept = c(".csv", ".xlsx", ".xls"),
-        buttonLabel = "Browse...",
-        placeholder = "CSV or Excel file"),
-      uiOutput("postal_column_ui"),
-      uiOutput("postal_status_ui")
     )
   })
 
@@ -3143,15 +2965,14 @@ server <- function(input, output, session) {
     map <- render_styled_map(
       layers, styles,
       add_control = !nearest_run,
-      furniture = furniture,
-      layer_labels = layer_labels
+      furniture = furniture
     )
     if (nearest_run) {
       connectors <- nearest_connectors(base_sf, overlay_sf, pairs)
       conn_style <- list(color = "#52514e", weight = 1, opacity = 0.7)
       map <- add_nearest_connectors(
         map, layers, connectors, conn_style, furniture = furniture,
-        layer_labels = layer_labels
+        layer_labels = NULL
       )
     }
     ontario <- sf::st_bbox(furniture_layer("PHU_simple"))
