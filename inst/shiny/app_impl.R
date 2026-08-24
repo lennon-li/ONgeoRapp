@@ -39,20 +39,58 @@ source_choices <- function() {
   stats::setNames(sources$source_id, source_choice_labels(sources))
 }
 
-# Maps a source's registry geography_type to the display-label type suffix.
-source_type_suffix <- function(geography_type) {
-  switch(geography_type,
-    boundary = "Polygon",
-    facility = "Point",
-    raster   = "Raster",
-    geography_type)
+# Source display labels are the registry name as-is. Geometry type is already
+# conveyed by the picker's optgroup header (Polygons/Rasters/Points) and the
+# colored geometry badge (source_geom_label()), so a "(Type)" suffix here was
+# a third, redundant signal - and stacked awkwardly with names that already
+# end in a parenthetical, e.g. "MOH Public Health Unit Boundary (post-2025,
+# 29 PHUs) (Polygon)".
+source_choice_labels <- function(sources) {
+  sources$name
 }
 
-# Appends "(Type)" to each source's display name, e.g.
-# "MOH Service Location (Point)". Used by both the flat and grouped choice
-# builders so labels stay consistent everywhere a source picker appears.
-source_choice_labels <- function(sources) {
-  sprintf("%s (%s)", sources$name, vapply(sources$geography_type, source_type_suffix, character(1)))
+# The human name for a picker id, for use anywhere the app has to say WHICH
+# layer it means rather than which slot. "postal_upload" is not a registry
+# source, so it is special-cased here rather than at each call site.
+layer_display_name <- function(source_id) {
+  if (is.null(source_id) || length(source_id) != 1L || is.na(source_id) ||
+      !nzchar(source_id)) {
+    return(NA_character_)
+  }
+  if (identical(source_id, "postal_upload")) return("Uploaded postal codes")
+  if (identical(source_id, "own_upload")) return("Uploaded point layer")
+  tryCatch(ONgeoR::get_source(source_id)$name, error = function(e) NA_character_)
+}
+
+# Leaflet group name for a drawn layer: the slot role plus the layer's actual
+# name, so the layers control reads "Source layer - Ontario Dam Inventory"
+# instead of leaving the user to remember which of two identical-looking
+# entries is which.
+#
+# These strings are load-bearing beyond the label. A group name is also the
+# key add_styled_sf_layer() draws into and the key the `ongeor-restyle`
+# handler looks up with map.layerManager.getLayerGroup(), so the drawing side
+# and the restyle side must derive the name the same way, from the same id.
+# Both derive it from the PREVIEWED ids, not the current picker selection:
+# changing a dropdown after a preview must not rename a group out from under
+# the layer already on the map.
+layer_group_label <- function(role, source_id) {
+  name <- layer_display_name(source_id)
+  if (is.na(name) || !nzchar(name)) return(role)
+  paste0(role, " - ", name)
+}
+
+# The two group names for a completed preview, given its `previewed` pair
+# c(base_id, overlay_id). Falls back to the bare role labels when there is no
+# preview yet, which is also what the pre-preview map (furniture only) needs.
+preview_group_labels <- function(previewed) {
+  if (length(previewed) < 2L) {
+    return(list(base = "Source layer", overlay = "Target layer"))
+  }
+  list(
+    base = layer_group_label("Source layer", previewed[[1]]),
+    overlay = layer_group_label("Target layer", previewed[[2]])
+  )
 }
 
 # Grouped-choices form for use with selectInput's optgroup support:
@@ -146,9 +184,10 @@ first_choice_grouped <- function(groups) {
 # Maps a source's registry geography_type to a small geometry kind token used
 # to drive the per-layer style controls and the relationship line.
 geom_kind <- function(source_id) {
-  if (source_id %in% c("postal_upload", "postal_points", "custom_target")) {
-    return("point")
-  }
+  # Both upload paths are points by construction: postal codes resolve to
+  # centroids, and read_uploaded_layer() rejects anything that is not a point
+  # layer. See the target upload UI for why polygon uploads are not accepted.
+  if (source_id %in% c("postal_upload", "own_upload")) return("point")
   switch(ONgeoR::get_source(source_id)$geography_type,
     boundary = "polygon",
     facility = "point",
@@ -166,9 +205,25 @@ layer_geom <- function(layer) {
   if (all(geometry_types %in% c("POINT", "MULTIPOINT"))) "point" else "polygon"
 }
 
+# The ON-Marg geography token for a source id, or NA when that layer has no
+# 2021 ON-Marg equivalent. onmarg_geographies() lists ten geographies, two of
+# which (LHIN and LHIN sub-region) carry no source_id because ONgeoR has no
+# boundary layer for them - those come back NA here and the option is simply
+# not offered.
+onmarg_geography_for <- function(source_id) {
+  if (is.null(source_id) || length(source_id) != 1L || is.na(source_id)) {
+    return(NA_character_)
+  }
+  table <- tryCatch(ONgeoR::onmarg_geographies(), error = function(e) NULL)
+  if (is.null(table)) return(NA_character_)
+  hit <- !is.na(table$source_id) & table$source_id == source_id
+  if (!any(hit)) return(NA_character_)
+  table$geography[which(hit)[1L]]
+}
+
 # Colored badge descriptor for a source's registry geography_type.
 source_geom_label <- function(source_id) {
-  if (source_id %in% c("postal_upload", "postal_points", "custom_target")) {
+  if (source_id %in% c("postal_upload", "own_upload")) {
     return(list(text = "Point", class = "geo-point"))
   }
   gt <- ONgeoR::get_source(source_id)$geography_type
@@ -253,8 +308,8 @@ layer_dimensions <- function(layer) {
 # dimensions can be quoted here rather than described in the abstract.
 join_confirm_modal <- function(source_id, target_id, source_sf, target_sf,
                                kinds) {
-  source_name <- source_layer_display_name(source_id)
-  target_name <- target_layer_display_name(target_id)
+  source_name <- layer_display_name(source_id)
+  target_name <- layer_display_name(target_id)
   is_raster <- inherits(target_sf, "SpatRaster") ||
     inherits(source_sf, "SpatRaster")
   n_target <- if (inherits(target_sf, "SpatRaster")) NA_integer_ else nrow(target_sf)
@@ -360,6 +415,13 @@ color_choices <- c(
 
 # basemap_groups defines the display order for the native Leaflet control.
 # "None" intentionally has no associated tile layer.
+#
+# Leaflet resolves base groups with getLayerGroup(g, ensureExists = TRUE), so
+# naming a group with no layer CREATES an empty feature group and attaches it
+# to the map. The control then walks this vector in order and keeps only the
+# first visible base layer, which removes the empty one again. That is why
+# "Light" must stay FIRST and "None" LAST: the order is what makes the
+# no-basemap entry behave, not a special case in leaflet.
 basemap_groups <- c(
   "Light", "Dark", "OpenStreetMap", "Satellite",
   "Topographic", "Streets", "Voyager", "None"
@@ -468,84 +530,73 @@ read_uploaded_file <- function(name, datapath) {
     NULL)
 }
 
-# Read and validate a user-supplied target. Custom targets are deliberately
-# narrower than registry targets: only non-empty point vectors with a CRS are
-# safe to pass to the point-first target workflow. The returned list keeps
-# validation errors available to the UI instead of turning an upload failure
-# into an opaque async-task error.
-read_uploaded_point_vector <- function(name, datapath) {
+# Reads an uploaded SPATIAL file into an EPSG:4326 sf layer, for the target
+# slot's "Use my own file".
+#
+# Points only, and that is a product decision rather than a technical limit:
+# the target slot drives the join direction, and an uploaded polygon target
+# reintroduces exactly the messy polygon-to-polygon overlay behaviour the app
+# was trimmed to avoid. Rejecting it here - loudly, with the geometry type
+# that was actually found - beats accepting it and producing a plausible but
+# meaningless join.
+#
+# shiny's fileInput hands over an extensionless tempfile, so the original
+# `name` carries the only usable format signal. A zipped shapefile is unzipped
+# into a session tempdir because sf needs the sidecar files (.dbf/.shx/.prj)
+# beside the .shp.
+read_uploaded_layer <- function(name, datapath) {
   ext <- tolower(tools::file_ext(name))
-  raster_exts <- c("tif", "tiff", "img", "grd", "nc")
-  if (ext %in% raster_exts) {
-    return(list(
-      sf = NULL,
-      error = "Raster files are not supported for a custom target. Upload a point vector file."
+  path <- switch(ext,
+    geojson = datapath,
+    json    = datapath,
+    gpkg    = datapath,
+    kml     = datapath,
+    zip = {
+      dir <- tempfile("ongeor-upload-")
+      dir.create(dir)
+      utils::unzip(datapath, exdir = dir)
+      shp <- list.files(dir, pattern = "\\.shp$", recursive = TRUE,
+        full.names = TRUE, ignore.case = TRUE)
+      if (length(shp) == 0L) {
+        rlang::abort("The uploaded zip archive contains no .shp file.")
+      }
+      if (length(shp) > 1L) {
+        rlang::abort(sprintf(
+          "The uploaded zip archive contains %d shapefiles; it must contain exactly one.",
+          length(shp)
+        ))
+      }
+      shp[[1L]]
+    },
+    rlang::abort(sprintf(
+      paste("Unsupported file type '.%s'. Upload a GeoJSON, GeoPackage, KML,",
+        "or a zipped shapefile."),
+      ext
     ))
-  }
-  if (!ext %in% c("geojson", "json", "gpkg", "shp", "zip")) {
-    return(list(
-      sf = NULL,
-      error = "Unsupported target file type. Upload GeoJSON, GeoPackage, or a zipped shapefile containing points."
-    ))
-  }
-
-  temp_dir <- NULL
-  path <- datapath
-  if (identical(ext, "zip")) {
-    temp_dir <- tempfile("ongeor_target_")
-    dir.create(temp_dir)
-    on.exit(unlink(temp_dir, recursive = TRUE, force = TRUE), add = TRUE)
-    extracted <- tryCatch(
-      utils::unzip(datapath, exdir = temp_dir),
-      error = function(e) e
-    )
-    if (inherits(extracted, "error")) {
-      return(list(sf = NULL, error = paste("Could not read the uploaded ZIP:", conditionMessage(extracted))))
-    }
-    candidates <- list.files(
-      temp_dir, recursive = TRUE, full.names = TRUE,
-      pattern = "\\.(geojson|json|gpkg|shp)$", ignore.case = TRUE
-    )
-    if (length(candidates) == 0L) {
-      return(list(
-        sf = NULL,
-        error = "The ZIP contains no supported point-vector file. Include a GeoJSON, GeoPackage, or shapefile."
-      ))
-    }
-    path <- candidates[[1]]
-  }
-
-  layer <- tryCatch(
-    sf::st_read(path, quiet = TRUE),
-    error = function(e) e
   )
-  if (inherits(layer, "error")) {
-    return(list(sf = NULL, error = paste("Could not read the target file:", conditionMessage(layer))))
-  }
-  if (!inherits(layer, "sf")) {
-    return(list(sf = NULL, error = "The uploaded file is not a vector layer."))
-  }
+
+  layer <- sf::st_read(path, quiet = TRUE)
   if (nrow(layer) == 0L) {
-    return(list(sf = NULL, error = "The uploaded target contains no features."))
+    rlang::abort("The uploaded layer contains no features.")
   }
-  geometry_types <- unique(as.character(sf::st_geometry_type(layer)))
-  if (!all(geometry_types %in% c("POINT", "MULTIPOINT"))) {
-    return(list(
-      sf = NULL,
-      error = "Custom targets must contain point features only; polygons and other geometry types are not supported."
+
+  types <- unique(as.character(sf::st_geometry_type(layer)))
+  if (!all(types %in% c("POINT", "MULTIPOINT"))) {
+    rlang::abort(sprintf(
+      paste("The target layer must be points. The uploaded file contains %s.",
+        "Upload a point layer, or pick a polygon layer from the dropdown",
+        "instead."),
+      paste(types, collapse = ", ")
     ))
   }
-  empty <- sf::st_is_empty(layer)
-  if (any(empty)) {
-    return(list(sf = NULL, error = "The uploaded target contains empty point geometries."))
-  }
+
   if (is.na(sf::st_crs(layer))) {
-    return(list(
-      sf = NULL,
-      error = "The uploaded target has no coordinate reference system. Assign a CRS and upload it again."
+    rlang::abort(paste(
+      "The uploaded layer has no coordinate reference system. Re-export it",
+      "with a CRS defined (a .prj file, for a shapefile)."
     ))
   }
-  list(sf = layer, error = NULL)
+  sf::st_transform(layer, 4326)
 }
 
 # Renders real (clickable) downloadButtons when an item's `ready` field is
@@ -557,26 +608,29 @@ read_uploaded_point_vector <- function(name, datapath) {
 # only by their disabled state.
 # Zip everything in `dir` and place the archive at EXACTLY `dest`.
 #
-# utils::zip() appends ".zip" whenever the target does not already end in
-# it, and downloadHandler hands its content function an EXTENSIONLESS
-# tempfile. Zipping straight onto that path therefore writes "<tmp>.zip"
-# and leaves "<tmp>" absent, so Shiny serves nothing and the browser
-# download fails -- observed 2026-08-06 in headless Chrome. The unit test
-# missed it because testServer supplies a path matching the declared
-# filename, which does end in .zip, so the test agreed with itself.
+# zip::zip() rather than utils::zip(), because utils::zip() shells out to an
+# external `zip` executable (R_ZIPCMD, default "zip") that Windows R does not
+# ship -- it arrives only with Rtools. On a stock Windows machine both zipped
+# downloads therefore died here, while CI stayed green: r-lib/actions puts
+# Rtools on PATH, and the test skipped itself when no zip was found. zip::zip
+# is pure C with no external binary, so the same code now works everywhere.
 #
-# Kept as a named helper rather than inline so the extensionless case can
-# be asserted directly in tests.
+# It also writes EXACTLY the path given, unlike utils::zip(), which appends
+# ".zip" whenever the target does not already end in it. downloadHandler hands
+# its content function an EXTENSIONLESS tempfile, so the old code wrote
+# "<tmp>.zip", left "<tmp>" absent, and the browser download failed -- observed
+# 2026-08-06 in headless Chrome. That is why `dest` is written directly here
+# and asserted extensionless in tests: testServer supplies a path matching the
+# declared filename, which does end in .zip, so a naive test agrees with itself.
+#
+# `root = dir` replaces a setwd()/on.exit() dance, so no working directory is
+# mutated. A pre-existing (possibly empty) `dest` is overwritten, which is what
+# downloadHandler hands over.
 zip_directory_to <- function(dir, dest) {
-  zip_path <- tempfile(fileext = ".zip")
-  old_wd <- setwd(dir)
-  on.exit(setwd(old_wd), add = TRUE, after = FALSE)
-  utils::zip(zip_path, files = list.files(dir))
-  setwd(old_wd)
-  if (!file.exists(zip_path)) {
+  zip::zip(dest, files = list.files(dir), root = dir)
+  if (!file.exists(dest)) {
     rlang::abort("Failed to build the shapefile archive.")
   }
-  file.copy(zip_path, dest, overwrite = TRUE)
   invisible(dest)
 }
 
@@ -611,28 +665,35 @@ collapse_crosswalk_best_match <- function(crosswalk) {
     return(crosswalk)
   }
   ids <- as.character(crosswalk$from_id)
-  coverage <- if ("coverage" %in% names(crosswalk)) crosswalk$coverage else rep(NA_real_, n)
-  distance <- if ("match_distance_km" %in% names(crosswalk)) {
-    crosswalk$match_distance_km
+  # [[ ]], not $: on a tibble, $ on an absent column emits an "Unknown or
+  # uninitialised column" warning. Harmless when this only ran for a download,
+  # but the Data tab now collapses the crosswalk on every join, so the same
+  # absent-column probe would warn on every run of the perfectly normal
+  # containment path (which has neither coverage nor match_distance_km).
+  coverage <- if (!is.null(crosswalk[["coverage"]])) {
+    crosswalk[["coverage"]]
   } else {
     rep(NA_real_, n)
   }
-  unique_ids <- unique(ids)
-  keep <- integer(length(unique_ids))
-  for (u in seq_along(unique_ids)) {
-    rows <- if (is.na(unique_ids[u])) which(is.na(ids)) else which(ids == unique_ids[u])
+  distance <- if (!is.null(crosswalk[["match_distance_km"]])) {
+    crosswalk[["match_distance_km"]]
+  } else {
+    rep(NA_real_, n)
+  }
+  rows_by_id <- split(seq_len(n), match(ids, unique(ids)))
+  keep <- vapply(rows_by_id, function(rows) {
     cov <- coverage[rows]
     if (any(!is.na(cov))) {
-      keep[u] <- rows[which(!is.na(cov))][which.max(cov[!is.na(cov)])]
+      rows[which(!is.na(cov))][which.max(cov[!is.na(cov)])]
     } else {
       dist <- distance[rows]
       if (any(!is.na(dist))) {
-        keep[u] <- rows[which(!is.na(dist))][which.min(dist[!is.na(dist)])]
+        rows[which(!is.na(dist))][which.min(dist[!is.na(dist)])]
       } else {
-        keep[u] <- rows[1L]
+        rows[1L]
       }
     }
-  }
+  }, integer(1))
   # sort() restores original row order of the winning rows; deterministic.
   crosswalk[sort(keep), , drop = FALSE]
 }
@@ -733,16 +794,19 @@ normalize_mixed_crosswalk <- function(crosswalk, source_sf, target_sf) {
 # target) keep their first value, and `linked_cells` records how many rows were
 # reduced. Targets with no linked rows get NA attributes and a count of 0.
 aggregate_linked_by_target <- function(link_attrs, row_of_target, n_targets) {
-  rows_for <- function(i) which(row_of_target == i)
+  rows_by_target <- split(
+    seq_along(row_of_target),
+    factor(row_of_target, levels = seq_len(n_targets))
+  )
   reduced <- lapply(link_attrs, function(column) {
     if (is.numeric(column)) {
       vapply(seq_len(n_targets), function(i) {
-        values <- column[rows_for(i)]
+        values <- column[rows_by_target[[i]]]
         if (all(is.na(values))) NA_real_ else mean(values, na.rm = TRUE)
       }, numeric(1))
     } else {
       vapply(seq_len(n_targets), function(i) {
-        values <- column[rows_for(i)]
+        values <- column[rows_by_target[[i]]]
         if (length(values) == 0L) NA_character_ else as.character(values[1L])
       }, character(1))
     }
@@ -838,6 +902,43 @@ merge_target_attributes <- function(target_sf, crosswalk = NULL, linked = NULL) 
   target_sf
 }
 
+# The crosswalk records WHICH source feature each target matched (to_id) but
+# not that feature's attributes, so a merge_target_attributes() result carries
+# the target's own columns plus join provenance and nothing from the source
+# layer. A user who joins a 5-attribute target to a 10-attribute source
+# reasonably expects to see all 15 in the result; this puts the missing 10
+# back by looking each target's matched to_id up in the source layer.
+#
+# Source columns are prefixed `src_` rather than merged bare: the two layers
+# frequently share generic names (NAME, OBJECTID), and a bare merge would
+# either collide or silently shadow the target's own values. The prefix also
+# answers "which layer did this column come from?" at a glance.
+merge_source_attributes <- function(merged_sf, source_sf, crosswalk = NULL) {
+  if (is.null(merged_sf) || is.null(source_sf)) return(merged_sf)
+  if (inherits(source_sf, "SpatRaster")) return(merged_sf)
+  if (is.null(crosswalk) || nrow(crosswalk) == 0L) return(merged_sf)
+  if (!all(c("to_id", "to_id_col") %in% names(crosswalk))) return(merged_sf)
+  if (!"to_id" %in% names(merged_sf)) return(merged_sf)
+
+  id_col <- crosswalk$to_id_col[1L]
+  if (is.na(id_col) || !id_col %in% names(source_sf)) return(merged_sf)
+
+  source_attrs <- sf::st_drop_geometry(source_sf)
+  # The id column is already present as to_id; repeating it adds no
+  # information and one more column to scroll past.
+  source_attrs <- source_attrs[, setdiff(names(source_attrs), id_col), drop = FALSE]
+  if (ncol(source_attrs) == 0L) return(merged_sf)
+
+  idx <- match(as.character(merged_sf$to_id), as.character(source_sf[[id_col]]))
+  names(source_attrs) <- paste0("src_", names(source_attrs))
+  for (nm in names(source_attrs)) {
+    # Unmatched targets carry NA here, matching how the crosswalk itself
+    # reports them - an unmatched row is not silently dropped.
+    merged_sf[[nm]] <- source_attrs[[nm]][idx]
+  }
+  merged_sf
+}
+
 # --- Map-view windowing for census layers ---------------------------------
 #
 # retrieve_census() accepts a bbox and filters server-side, but nothing in the
@@ -858,8 +959,20 @@ is_census_source <- function(source_id) {
 # offered pre-ticked for them and left off for the small ones.
 census_window_threshold <- 1000
 
+# Layers whose retrieval accepts a bbox. Census layers go through
+# retrieve_census(); the province-wide postal-code layer goes through
+# retrieve_postal_points(). Both are windowed in the task's fetch() below.
+#
+# The postal layer is 299,782 points province-wide - drawing or joining all of
+# them is not something a user should be able to ask for by accident, so it
+# clears census_window_threshold comfortably and the window arrives pre-ticked.
+is_windowable_source <- function(source_id) {
+  is_census_source(source_id) ||
+    (!is.null(source_id) && identical(source_id, "postal_points"))
+}
+
 census_window_default <- function(source_id) {
-  if (!is_census_source(source_id)) return(FALSE)
+  if (!is_windowable_source(source_id)) return(FALSE)
   reg <- tryCatch(ONgeoR::list_sources(), error = function(e) NULL)
   if (is.null(reg) || is.null(reg$feature_count)) return(FALSE)
   n <- suppressWarnings(as.numeric(reg$feature_count[match(source_id, reg$source_id)]))
@@ -885,7 +998,7 @@ map_view_bbox <- function(bounds) {
 # wrong number is worse than an honest "this may take minutes".
 run_hint_text <- function(ids) {
   ids <- ids[!is.na(ids)]
-  ids <- setdiff(ids[nzchar(ids)], "postal_upload")
+  ids <- setdiff(ids[nzchar(ids)], c("postal_upload", "own_upload"))
   if (!length(ids)) return("")
   reg <- tryCatch(ONgeoR::list_sources(), error = function(e) NULL)
   if (is.null(reg) || is.null(reg$feature_count)) return("")
@@ -930,6 +1043,18 @@ task_status_ui <- function(state, detail = NULL, phases = character()) {
     if (!is.null(detail)) paste(" ", detail)
   )
 }
+
+# What the user is told when a run is cancelled. Cancellation is COOPERATIVE:
+# the worker stops at its next phase boundary, so a download already in flight
+# runs to the end (see new_cancel_path()). Saying only "Cancelled" while a large
+# first-time fetch keeps going is the same "the state says X but X has not
+# happened" dishonesty that this dialog exists to avoid, so the wait is named
+# and the user is given the one guaranteed escape: restart the app.
+cancel_wait_note <- paste(
+  "The step already running cannot be interrupted, so this can take a while -",
+  "a large first-time download runs to the end. Nothing will be added to the",
+  "map. If you would rather not wait, close and restart the app."
+)
 
 # The progress dialog SHELL. Shown exactly once per run and never re-rendered
 # by Shiny.
@@ -993,8 +1118,16 @@ task_progress_js <- tags$script(HTML("
     var html = '';
     for (var i = 0; i < m.phases.length; i++) {
       var label = esc(m.phases[i]).replace(/\\s*\\.\\.\\.$/, '');
-      var done = m.done || (i !== m.phases.length - 1);
-      if (done) {
+      var last = (i === m.phases.length - 1);
+      // A cancelled run must NOT show a check against the step that was still
+      // running - the worker stops at its next phase boundary, so that step is
+      // unfinished, not done.
+      var done = last ? (m.done && !m.stopped) : true;
+      if (last && m.stopped) {
+        html += '<li class=\"task-phase task-phase-stopped mb-1\">' +
+                '<span class=\"task-phase-check text-warning me-2\">\\u23f8</span>' +
+                label + ' &mdash; <span class=\"text-muted\">still finishing</span></li>';
+      } else if (done) {
         html += '<li class=\"task-phase task-phase-done mb-1\">' +
                 '<span class=\"task-phase-check text-success me-2\">\\u2713</span>' +
                 label + ' &mdash; <span class=\"text-muted\">done</span></li>';
@@ -1007,18 +1140,24 @@ task_progress_js <- tags$script(HTML("
     if (m.done && !m.ok && m.title) {
       html += '<li class=\"task-phase text-danger mt-2\"><strong>' + esc(m.title) + '</strong></li>';
     }
+    if (m.note) {
+      html += '<li class=\"task-phase task-phase-note text-muted small mt-1\">' + esc(m.note) + '</li>';
+    }
     list.innerHTML = html;
     var hint = document.getElementById('task_hint');
     if (hint) hint.innerHTML = m.done ? '' : esc(m.hint || '');
     var bar = document.getElementById('task_activity');
-    if (bar) bar.style.display = m.done ? 'none' : '';
+    // Still-finishing work keeps the bar and the clock going: they are the only
+    // honest signal that the app has not gone quiet on the user.
+    var running = !m.done || m.stopped;
+    if (bar) bar.style.display = running ? '' : 'none';
     var cancel = document.getElementById('cancel_task_btn');
     var okb = document.getElementById('progress_ok_btn');
     if (m.done) {
       if (cancel) cancel.classList.add('d-none');
       if (okb) okb.classList.remove('d-none');
     }
-    startClock(m.done);
+    startClock(!running);
     return true;
   }
 
@@ -1058,6 +1197,115 @@ task_progress_js <- tags$script(HTML("
 })();
 "))
 
+# The Data tab is always present now (it used to be hidden entirely via
+# bslib::nav_hide()/nav_show(), which meant a first-time user could not see
+# it existed until after a successful join). Bootstrap's own
+# `.nav-link.disabled` handles the greyed-out, unclickable look and sets
+# `pointer-events: none` for us; this just toggles that class on the "Data"
+# link. Matches the ongeor-progress pattern: a plain custom message, not a
+# reactive chain, because the sender lives inside the same ExtendedTask
+# result-handling observer as other terminal-state pushes and a chained
+# observer reading a reactiveVal there would not re-flush (see
+# extendedtask-observer-reflush-trap.md).
+data_tab_js <- tags$script(HTML("
+(function(){
+  Shiny.addCustomMessageHandler('ongeor-data-tab', function(disabled){
+    var links = document.querySelectorAll('#main_tabs .nav-link');
+    links.forEach(function(a){
+      if ((a.textContent || '').trim() === 'Data') {
+        a.classList.toggle('disabled', !!disabled);
+        if (disabled) { a.setAttribute('aria-disabled', 'true'); }
+        else { a.removeAttribute('aria-disabled'); }
+      }
+    });
+  });
+})();
+"))
+
+# Restyles already-drawn layers in place so colour/opacity control changes do
+# not rebuild the whole map (~38 s for the full PHU layer). The server sends
+# {group: {style}} keyed by the layer-group names build_link_map() draws with;
+# only the two slot groups are ever addressed (the "PHU_simple" furniture
+# group keeps its fixed style). A dropped message is safe: any subsequent
+# rebuild redraws from the current input values, so nothing can go stale.
+# HTMLWidgets.find('#cw_map') does NOT return the Leaflet map for a
+# Shiny-rendered widget: it returns the binding's wrapper, whose own keys are
+# getMap/renderValue/doRenderValue/resize, and whose `layerManager` is
+# undefined. Verified in a headless browser - reading `.layerManager` straight
+# off the wrapper made this handler return at its own guard on every message,
+# so colour changes silently did nothing while the rebuild that used to apply
+# them had already been removed. The map (and its layerManager) is reached
+# through getMap(). leaflet's non-Shiny factory path does return the map
+# directly, which is what makes the wrong form look right in the sources.
+# Leaflet refuses to draw into an element that measures 0x0: doRenderValue()
+# stores the payload in map.leafletr.pendingRenderData and returns, drawing
+# NOTHING - no tiles, no layers, no control. The ONLY thing that replays that
+# payload is the widget's own resize() method, which calls invalidateSize()
+# and then re-runs doRenderValue().
+#
+# Nothing in this app ever triggered it. htmlwidgets binds a resize handler to
+# `shown.bs.tab` only for STATIC widgets, not for Shiny outputs, and its
+# window-resize handler bails out when the measured size is unchanged - which
+# is exactly the hidden-then-shown case, since a viewport-relative height
+# ("calc(100vh - 130px)") measures the same before and after. So a map that
+# lost the zero-size race stayed blank until the user resized the window.
+#
+# That is the "tiles come back empty sometimes" report: on first load the
+# bslib fill layout settles asynchronously, so whether #cw_map has a non-zero
+# height when the first payload arrives is a race, which is why it is
+# intermittent. Switching to the Data tab and back re-enters the same trap,
+# because a hidden tab pane is display:none and therefore 0x0.
+#
+# HTMLWidgets.getInstance(el) returns leaflet's own instance object, whose
+# resize(width, height) is the documented recovery path - this is not reaching
+# into private state. Calling it when nothing is pending is harmless: it just
+# invalidates the size.
+map_flush_js <- tags$script(HTML("
+(function(){
+  function flushMap(){
+    var el = document.getElementById('cw_map');
+    if (!el || !window.HTMLWidgets || !HTMLWidgets.getInstance) return;
+    var rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    var inst = HTMLWidgets.getInstance(el);
+    if (!inst || typeof inst.resize !== 'function') return;
+    inst.resize(rect.width, rect.height);
+  }
+  // Deferred past the paint that follows the tab switch, so the pane has
+  // real dimensions by the time we measure it.
+  function flushSoon(){
+    requestAnimationFrame(function(){ setTimeout(flushMap, 0); });
+  }
+  if (window.jQuery) {
+    jQuery(document).on('shown.bs.tab', flushSoon);
+  }
+  document.addEventListener('shiny:value', function(e){
+    if (e.name === 'cw_map') flushSoon();
+  });
+  if (window.Shiny) {
+    jQuery(document).on('shiny:connected', flushSoon);
+  }
+  window.addEventListener('load', flushSoon);
+})();
+"))
+
+restyle_js <- tags$script(HTML("
+(function(){
+  Shiny.addCustomMessageHandler('ongeor-restyle', function(styles){
+    var widget = HTMLWidgets.find('#cw_map');
+    var map = (widget && typeof widget.getMap === 'function') ? widget.getMap() : null;
+    if (!map || !map.layerManager) return;
+    Object.keys(styles).forEach(function(group){
+      var grp = map.layerManager.getLayerGroup(group, false);
+      if (!grp) return;
+      grp.eachLayer(function(layer){
+        if (typeof layer.setStyle === 'function') layer.setStyle(styles[group]);
+      });
+    });
+  });
+})();
+"))
+
 # --- Phase reporting across the future boundary ---------------------------
 # Fetch and join run inside a future in a separate R process, which cannot
 # write to a reactiveVal. The task writes its current phase to a plain file
@@ -1066,6 +1314,42 @@ task_progress_js <- tags$script(HTML("
 # main session polls the file while the task runs.
 new_progress_path <- function() {
   tempfile(pattern = "ongeor-progress-", fileext = ".txt")
+}
+
+# --- Cooperative cancellation ---------------------------------------------
+# Cancel used to be a lie about the work: it bumped the generation counter so
+# the result would be discarded, set the state to "cancelled", and left the
+# future running to completion in a worker. Two consequences, the second
+# user-visible: a cancelled run kept burning a worker and its download, and
+# because ExtendedTask QUEUES invocations, the next Preview sat behind the
+# abandoned one showing "Starting" for as long as the discarded work took.
+#
+# There is no way to interrupt it from here. future::cancel() exists (future
+# 1.70.0) but ExtendedTask never exposes the underlying Future, and rebuilding
+# the task layer to expose it would mean rewriting the most delicate machinery
+# in this app (see extendedtask-observer-reflush-trap.md). So cancellation is
+# cooperative over the same channel the phase log already uses: the main
+# session creates a sentinel file, and the worker checks for it at each phase
+# boundary and aborts.
+#
+# HONEST LIMIT, stated because the button's label implies more: this aborts at
+# the NEXT phase boundary, not mid-call. A run blocked inside a first-time
+# multi-minute download - exactly when a user reaches for Cancel - keeps that
+# download alive until it returns. What it reliably prevents is proceeding to
+# the next expensive step (the join, or serialising a large layer back), which
+# is where most of the wasted time was.
+new_cancel_path <- function() {
+  tempfile(pattern = "ongeor-cancel-", fileext = ".txt")
+}
+
+# length-1 check first: a reactiveVal that has never been set yields NULL, and a
+# cleared one can yield character(0), where `nzchar(x)` is logical(0) and
+# `&& logical(0)` is an error in current R rather than FALSE.
+request_cancel <- function(path) {
+  if (length(path) == 1L && !is.na(path) && nzchar(path)) {
+    try(file.create(path), silent = TRUE)
+  }
+  invisible(NULL)
 }
 
 read_progress_phase <- function(path) {
@@ -1203,10 +1487,13 @@ add_styled_sf_layer <- function(map, layer, group, style) {
     if (identical(style$point_shape, "square")) {
       buf_deg <- style$point_size * 0.0015
       coords <- sf::st_coordinates(layer)
+      cos_latitude <- pmax(cos(coords[, 2] * pi / 180), .Machine$double.eps)
+      longitude_offset <- buf_deg / cos_latitude
+      # Squares remain geography-sized (zoom-scaled), unlike pixel-radius circles.
       map <- leaflet::addRectangles(
         map,
-        lng1 = coords[, 1] - buf_deg, lat1 = coords[, 2] - buf_deg,
-        lng2 = coords[, 1] + buf_deg, lat2 = coords[, 2] + buf_deg,
+        lng1 = coords[, 1] - longitude_offset, lat1 = coords[, 2] - buf_deg,
+        lng2 = coords[, 1] + longitude_offset, lat2 = coords[, 2] + buf_deg,
         group = group, popup = popups,
         color = style$point_color, fillColor = style$point_color,
         fillOpacity = 0.8, weight = 1
@@ -1271,6 +1558,78 @@ furniture_layers <- function(selected_ids = character()) {
     layers[["PHU_simple"]] <- furniture_layer("PHU_simple")
   }
   layers
+}
+
+# Simplifies polygon geometry for map.html EXPORT ONLY. Never called on
+# cw_result itself - the live interactive map, the Data tab, and the
+# Table/Shape downloads all read cw_result directly and are unaffected.
+# Point and line layers pass through unchanged; only sf layers whose every
+# geometry is POLYGON or MULTIPOLYGON (including mixed POLYGON+MULTIPOLYGON
+# layers) are touched.
+#
+# Recipe matches ONgeoR's own data-raw/phu_simple.R build (which produces the
+# bundled PHU_simple furniture layer) - it is not a new invention, and it
+# lands on the same ~20.5k-vertex result that build already ships and calls
+# "visually indistinguishable" at this scale. Two things both turned out to
+# be load-bearing, each verified in isolation:
+#  - A live full-resolution PHU boundary carries 37,061 polygon parts
+#    (Ontario's lakes and islands), and st_simplify(preserveTopology = TRUE)
+#    enforces a minimum ring per PART, so part count - not vertex density -
+#    sets a floor. Small parts have to be dropped BEFORE simplifying, or nothing
+#    shrinks regardless of tolerance.
+#  - st_simplify barely simplifies lon/lat geometry directly: run on
+#    already-part-dropped geometry in the SOURCE (geographic) CRS, tolerances
+#    from 50 m to 1 km equivalent moved vertex count by 4 out of ~300k. Only
+#    reprojecting to a metric CRS first (matching phu_simple.R's own EPSG:3161
+#    choice) makes the tolerance argument mean anything.
+# Measured on the live PHU boundary layer with the defaults below:
+# 607,848 -> 20,650 vertices (3.4% of original), area deviation 0.056%.
+simplify_for_export <- function(x, tol_m = 250, min_part_area_m2 = 1e6) {
+  if (!inherits(x, "sf")) return(x)
+  # Check per-geometry types: a mixed POLYGON+MULTIPOLYGON layer reports the
+  # collection type "GEOMETRY", which a layer-level check would reject and
+  # then silently export unsimplified.
+  geom_types <- unique(as.character(sf::st_geometry_type(x)))
+  if (!all(geom_types %in% c("POLYGON", "MULTIPOLYGON"))) return(x)
+
+  source_crs <- sf::st_crs(x)
+  # Ontario MNR Lambert (metres) - ONgeoR's own choice for this exact
+  # operation (data-raw/phu_simple.R) and appropriate for its Ontario-only
+  # data, but this is a display-simplification default, not a general-purpose
+  # equal-area projection for arbitrary extents.
+  x_m <- sf::st_transform(x, 3161)
+
+  mp <- suppressWarnings(sf::st_cast(x_m, "MULTIPOLYGON"))
+  parts <- suppressWarnings(sf::st_cast(mp, "POLYGON"))
+  # The part counts must come from the cast object itself, not from x_m:
+  # length() on a POLYGON sfg returns the RING count (outer ring plus holes),
+  # which desyncs row_index from parts and corrupts the keep filter below
+  # for any layer with holes. length() on the MULTIPOLYGON cast is the part
+  # count, so sum() of these counts equals nrow(parts) for every input.
+  row_index <- rep(seq_len(nrow(mp)), vapply(sf::st_geometry(mp), length, integer(1)))
+  keep <- as.numeric(sf::st_area(parts)) >= min_part_area_m2
+
+  geom <- sf::st_sfc(lapply(seq_len(nrow(x_m)), function(i) {
+    sel <- which(row_index == i & keep)
+    # Never let a feature vanish: if every part is below threshold, keep its
+    # largest one so every row survives.
+    if (length(sel) == 0) {
+      row_parts <- which(row_index == i)
+      sel <- row_parts[which.max(as.numeric(sf::st_area(parts[row_parts, ])))]
+    }
+    sf::st_cast(sf::st_combine(sf::st_geometry(parts)[sel]), "MULTIPOLYGON")[[1]]
+  }), crs = sf::st_crs(x_m))
+
+  x_m <- sf::st_set_geometry(x_m, geom)
+  x_m <- sf::st_simplify(x_m, dTolerance = tol_m, preserveTopology = TRUE)
+  # Combining and simplifying parts can produce rings that pass s2 (used for
+  # geographic-CRS validity checks) but fail GEOS's stricter planar rules -
+  # the same class of defect data-raw/hive_make_valid.R exists to fix.
+  # Repair here, in the planar CRS, before transforming back.
+  x_m <- sf::st_make_valid(x_m)
+
+  simplified <- sf::st_transform(x_m, source_crs)
+  sf::st_cast(simplified, "MULTIPOLYGON")
 }
 
 add_furniture_layer <- function(map, layer, group) {
@@ -1380,19 +1739,16 @@ nearest_connectors <- function(source_sf, target_sf, pairs) {
   }
   source_geom <- sf::st_geometry(source_sf)[source_idx[keep]]
   target_geom <- sf::st_geometry(target_sf)[target_idx[keep]]
-  lines <- sf::st_sfc(
-    lapply(seq_along(source_geom), function(i) {
-      sf::st_nearest_points(source_geom[i], target_geom[i], pairwise = TRUE)[[1]]
-    }),
-    crs = sf::st_crs(source_sf)
-  )
+  lines <- sf::st_nearest_points(source_geom, target_geom, pairwise = TRUE)
+  sf::st_crs(lines) <- sf::st_crs(source_sf)
   sf::st_sf(geometry = lines)
 }
 
 ui <- bslib::page_fillable(
   window_title = "ONgeoR",
   theme = bslib::bs_theme(version = 5, primary = "#2a78d6", success = "#0ca30c"),
-  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js),
+  tags$head(tags$link(rel = "stylesheet", href = "theme.css"), task_progress_js,
+    data_tab_js, restyle_js, map_flush_js),
   # The logo lives at the top of the sidebar, not in a page header. The app is
   # a single-purpose linking interface, so the layout can fill the page
   # directly and a header bar would only cost the map vertical space.
@@ -1416,13 +1772,27 @@ ui <- bslib::page_fillable(
             selected = "moh_service_locations")
         ),
         tags$div(class = "slot-meta",
-          uiOutput("overlay_geom_badge")
+          uiOutput("overlay_geom_badge"),
+          # An own-file upload and the postal-code dropdown both REPLACE the
+          # target layer, so having both set at once is not a preference the
+          # app can honour - it is two answers to one question. The checkbox
+          # disappears while "Upload postal codes" is selected, and a server
+          # observer also forces it back to FALSE, because a hidden
+          # conditionalPanel keeps whatever value it had when it was hidden.
+          conditionalPanel(
+            "input.overlay_source != 'postal_upload'",
+            checkboxInput("overlay_upload_own", "Use my own file", FALSE)
+          )
         ),
         conditionalPanel(
-          "input.overlay_target_mode == 'own_file'",
-          fileInput("overlay_own_file", "Point target file", buttonLabel = "Browse...",
-            accept = c(".geojson", ".json", ".gpkg", ".shp", ".zip"),
-            placeholder = "GeoJSON, GeoPackage, or zipped shapefile"),
+          "input.overlay_upload_own && input.overlay_source != 'postal_upload'",
+          fileInput("overlay_own_file", NULL, buttonLabel = "Browse...",
+            placeholder = "GeoJSON, GeoPackage, KML, or zipped shapefile"),
+          tags$p(class = "text-muted",
+            paste("Point layers only. The target drives the join direction,",
+              "so an uploaded polygon target would reintroduce the",
+              "polygon-to-polygon overlay this app avoids - pick a polygon",
+              "from the Source dropdown instead.")),
           uiOutput("overlay_own_status_ui")
         ),
         uiOutput("postal_upload_ui")
@@ -1430,6 +1800,7 @@ ui <- bslib::page_fillable(
       tags$div(class = "slot-block slot-base",
         selectInput("base_layer", "2. Source layer to join from", choices = source_choices_grouped(), selected = "phu_boundaries"),
         uiOutput("census_window_ui"),
+        uiOutput("onmarg_ui"),
         tags$div(class = "slot-meta",
           uiOutput("base_geom_badge")
         )
@@ -1478,17 +1849,21 @@ ui <- bslib::page_fillable(
 
 server <- function(input, output, session) {
 
-  # Keep results unavailable until a join has actually completed. nav_hide()
-  # and nav_show() are bslib's supported wrappers around Shiny tab updates.
-  bslib::nav_hide("main_tabs", "data", session = session)
+  # The Data tab stays visible but greyed out (see data_tab_js) until a join
+  # has actually completed, so a first-time user can see it exists rather
+  # than wondering where results will show up. Sent directly, not through a
+  # reactive chain - see data_tab_js's comment.
+  session$sendCustomMessage("ongeor-data-tab", TRUE)
 
   # --- Async tasks (ExtendedTask; requires shiny >= 1.8.0) -----------
 
   preview_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                      generation,
-                                                     overlay_layer = NULL,
+                                                     supplied_layer = NULL,
                                                      progress_path = NULL,
-                                                     bbox = NULL) {
+                                                     bbox = NULL,
+                                                     cancel_path = NULL,
+                                                     onmarg = NULL) {
     promises::future_promise({
       # Defined INSIDE the future block on purpose. The app-level
       # pack_spatial() is a closure over the app source environment, which
@@ -1511,8 +1886,23 @@ server <- function(input, output, session) {
       fetch <- function(id) {
         if (!is.null(bbox) && startsWith(id, "census_")) {
           ONgeoR::retrieve_census(id, bbox = bbox)
+        } else if (!is.null(bbox) && identical(id, "postal_points")) {
+          # retrieve_source() does not forward a bbox, and the whole-province
+          # postal layer is 299,782 points, so the windowed call goes direct.
+          ONgeoR::retrieve_postal_points(bbox = bbox)
         } else {
           ONgeoR::retrieve_source(id)
+        }
+      }
+      # Local copy for the same export reason as pack()/note(); cancel_path is a
+      # plain character scalar. See new_cancel_path() for what this can and
+      # cannot do.
+      stop_if_cancelled <- function() {
+        if (!is.null(cancel_path) && file.exists(cancel_path)) {
+          stop(structure(
+            class = c("ongeor_cancelled", "error", "condition"),
+            list(message = "Run cancelled by the user.", call = NULL)
+          ))
         }
       }
       note(if (is.null(bbox)) {
@@ -1520,10 +1910,30 @@ server <- function(input, output, session) {
       } else {
         "Retrieving source data (current map view only)..."
       })
+      stop_if_cancelled()
       base_sf    <- fetch(base_id)
+      if (!is.null(onmarg)) {
+        note("Adding ON-Marg measures...")
+        stop_if_cancelled()
+        # add_onmarg() reports its match count as a message; the phase log is
+        # the app's channel for that kind of progress, so the message is
+        # captured rather than left to vanish into the worker's stdout.
+        withCallingHandlers(
+          base_sf <- ONgeoR::add_onmarg(base_sf, onmarg),
+          message = function(m) {
+            note(trimws(conditionMessage(m)))
+            invokeRestart("muffleMessage")
+          }
+        )
+      }
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(overlay_layer)) overlay_layer else fetch(overlay_id)
+      stop_if_cancelled()
+      overlay_sf <- if (!is.null(supplied_layer)) supplied_layer else fetch(overlay_id)
       note("Preparing layers for the map...")
+      # Checked before packing: a full-resolution layer is expensive to
+      # serialise back across the future boundary, and a cancelled result is
+      # discarded by the generation guard on arrival anyway.
+      stop_if_cancelled()
       list(base_sf = pack(base_sf),
            overlay_sf = pack(overlay_sf),
            base_id = base_id, overlay_id = overlay_id,
@@ -1533,9 +1943,11 @@ server <- function(input, output, session) {
 
   build_task <- shiny::ExtendedTask$new(function(base_id, overlay_id,
                                                    generation,
-                                                   overlay_layer = NULL,
+                                                   supplied_layer = NULL,
                                                    progress_path = NULL,
-                                                   bbox = NULL) {
+                                                   bbox = NULL,
+                                                   cancel_path = NULL,
+                                                   onmarg = NULL) {
     promises::future_promise({
       # Local copies, not the app-level pack_spatial()/layer_geom() - see the
       # note in preview_task: those closures enclose the multisession plan and
@@ -1556,8 +1968,22 @@ server <- function(input, output, session) {
       fetch <- function(id) {
         if (!is.null(bbox) && startsWith(id, "census_")) {
           ONgeoR::retrieve_census(id, bbox = bbox)
+        } else if (!is.null(bbox) && identical(id, "postal_points")) {
+          # retrieve_source() does not forward a bbox, and the whole-province
+          # postal layer is 299,782 points, so the windowed call goes direct.
+          ONgeoR::retrieve_postal_points(bbox = bbox)
         } else {
           ONgeoR::retrieve_source(id)
+        }
+      }
+      # Local copy for the same export reason as pack()/note(). See
+      # new_cancel_path() for the honest limit on what this achieves.
+      stop_if_cancelled <- function() {
+        if (!is.null(cancel_path) && file.exists(cancel_path)) {
+          stop(structure(
+            class = c("ongeor_cancelled", "error", "condition"),
+            list(message = "Run cancelled by the user.", call = NULL)
+          ))
         }
       }
       note(if (is.null(bbox)) {
@@ -1565,10 +1991,30 @@ server <- function(input, output, session) {
       } else {
         "Retrieving source data (current map view only)..."
       })
+      stop_if_cancelled()
       base_sf    <- fetch(base_id)
+      if (!is.null(onmarg)) {
+        note("Adding ON-Marg measures...")
+        stop_if_cancelled()
+        # add_onmarg() reports its match count as a message; the phase log is
+        # the app's channel for that kind of progress, so the message is
+        # captured rather than left to vanish into the worker's stdout.
+        withCallingHandlers(
+          base_sf <- ONgeoR::add_onmarg(base_sf, onmarg),
+          message = function(m) {
+            note(trimws(conditionMessage(m)))
+            invokeRestart("muffleMessage")
+          }
+        )
+      }
       note("Retrieving target data...")
-      overlay_sf <- if (!is.null(overlay_layer)) overlay_layer else fetch(overlay_id)
+      stop_if_cancelled()
+      overlay_sf <- if (!is.null(supplied_layer)) supplied_layer else fetch(overlay_id)
       note("Joining layers...")
+      # The single most valuable checkpoint: every branch below is the actual
+      # spatial join, and this is the boundary a user who cancelled during
+      # retrieval reaches next.
+      stop_if_cancelled()
       base_kind    <- kind_of(base_sf)
       overlay_kind <- kind_of(overlay_sf)
       if (base_kind == "raster" || overlay_kind == "raster") {
@@ -1707,12 +2153,12 @@ server <- function(input, output, session) {
   })
   output$overlay_geom_badge <- renderUI({
     req(input$overlay_source)
-    geo_badge(input$overlay_source)
+    geo_badge(effective_overlay_id())
   })
   output$link_relationship <- renderUI({
     req(input$base_layer, input$overlay_source)
     tags$p(class = "geo-relationship text-muted",
-      relationship_text(geom_kind(input$base_layer), geom_kind(input$overlay_source)))
+      relationship_text(geom_kind(input$base_layer), geom_kind(effective_overlay_id())))
   })
 
   # Per-layer style controls, driven by each selected source's geometry.
@@ -1722,13 +2168,13 @@ server <- function(input, output, session) {
   })
   output$overlay_style_ui <- renderUI({
     req(input$overlay_source)
-    layer_style_controls("overlay", geom_kind(input$overlay_source), accent = "#1baf7a")
+    layer_style_controls("overlay", geom_kind(effective_overlay_id()), accent = "#1baf7a")
   })
 
   output$link_method_ui <- renderUI({
     req(input$base_layer, input$overlay_source)
     base_k <- geom_kind(input$base_layer)
-    overlay_k <- geom_kind(input$overlay_source)
+    overlay_k <- geom_kind(effective_overlay_id())
     help_link <- actionLink("method_help", "?", class = "method-help",
       title = "How linking works, by layer types")
     # No match rule to choose: the geometry pair alone decides the operation.
@@ -1751,10 +2197,22 @@ server <- function(input, output, session) {
     ))
   })
 
+  # render_token exists solely to make the map re-render. shiny's
+  # reactiveValues dedupes on identical(): assigning a value equal to the one
+  # already held invalidates nothing. A repeat Preview of the same pair writes
+  # base_sf/overlay_sf/previewed back to values that ARE identical (an sf layer
+  # round-trips through the future's serialize/unserialize bit-identically -
+  # measured, not assumed), and pairs is NULL both before and after for the
+  # common containment and raster branches. So every dependency of link_map()
+  # deduped, output$cw_map never re-executed, and - because this app has no
+  # leafletProxy path, only whole-widget renders - the browser was sent
+  # nothing at all. That is the "re-ran Preview and the features never came
+  # back" report. Bumping a token the map reads makes a preview always redraw.
   cw_result <- reactiveValues(crosswalk = NULL, linked = NULL, pairs = NULL,
-    base_sf = NULL, overlay_sf = NULL, previewed = NULL)
+    base_sf = NULL, overlay_sf = NULL, previewed = NULL, render_token = 0L)
   preview_generation <- reactiveVal(0L)
   preview_active_generation <- reactiveVal(NULL)
+  previewed_bbox <- reactiveVal(NULL)
   link_generation <- reactiveVal(0L)
   link_active_generation <- reactiveVal(NULL)
   link_active_inputs <- reactiveVal(NULL)
@@ -1768,10 +2226,116 @@ server <- function(input, output, session) {
   # new_progress_path / read_progress_phase).
   preview_progress_path <- reactiveVal(NULL)
   link_progress_path <- reactiveVal(NULL)
+  # Sentinel paths the Cancel button touches; the workers poll them at phase
+  # boundaries (see new_cancel_path()).
+  preview_cancel_path <- reactiveVal(NULL)
+  link_cancel_path <- reactiveVal(NULL)
+
+  # Each run now owns TWO temp files (phase log + cancel sentinel), and every
+  # terminal OR abandoned path has to drop both. Centralised because the
+  # abandoned paths are easy to miss: the link status observer unlinked only
+  # after its two early returns, so an inputs-changed or superseded-generation
+  # run leaked its phase file every time.
+  # CRITICAL ordering constraint, found by test-cancel.R rather than by reading:
+  # the cancel sentinel must outlive the state change that requests it. Cancel
+  # sets preview_state("cancelled"), which invalidates the terminal-state
+  # observer below in the SAME flush - and when that observer cleared both files,
+  # it deleted the sentinel before the still-running worker had a chance to see
+  # it, so cancellation silently did nothing at all. Only clear the sentinel once
+  # the worker has actually returned (the task-status observers); the
+  # state-driven observer clears the phase log only.
+  clear_preview_progress_file <- function() {
+    unlink(isolate(preview_progress_path()) %||% character())
+  }
+  clear_preview_run_files <- function() {
+    clear_preview_progress_file()
+    unlink(isolate(preview_cancel_path()) %||% character())
+  }
+  clear_link_progress_file <- function() {
+    unlink(isolate(link_progress_path()) %||% character())
+  }
+  clear_link_run_files <- function() {
+    clear_link_progress_file()
+    unlink(isolate(link_cancel_path()) %||% character())
+  }
   preview_progress_log <- reactiveVal(character())
   link_progress_log <- reactiveVal(character())
 
   # --- Postal upload handling ------------------------------------------
+
+  # --- Target layer supplied by the user -----------------------------------
+  # Two mutually exclusive ways to replace the dropdown target: the postal-code
+  # list, and an uploaded point layer. Both end up in the same place - a ready
+  # sf layer handed to the tasks as `supplied_layer` - so the rest of the app
+  # only has to know "was a layer supplied", not which route produced it.
+  own_upload_active <- reactive({
+    isTRUE(input$overlay_upload_own) &&
+      !identical(input$overlay_source, "postal_upload")
+  })
+
+  # The id the app should REASON with, as opposed to the raw picker value. A
+  # supplied layer is not a registry source, so it gets a sentinel that
+  # geom_kind(), layer_display_name() and friends understand; retrieve_source()
+  # never sees it, because a supplied layer short-circuits the fetch.
+  effective_overlay_id <- reactive({
+    if (own_upload_active()) "own_upload" else input$overlay_source
+  })
+
+  own_layer_result <- reactive({
+    req(input$overlay_own_file)
+    own_error <- NULL
+    layer <- tryCatch(
+      read_uploaded_layer(
+        input$overlay_own_file$name, input$overlay_own_file$datapath
+      ),
+      error = function(e) {
+        own_error <<- e
+        NULL
+      }
+    )
+    list(sf = layer, error = own_error)
+  })
+
+  # The layer to hand the tasks, or NULL to let them fetch the dropdown source.
+  supplied_target_layer <- reactive({
+    if (identical(input$overlay_source, "postal_upload")) {
+      pr <- postal_result()
+      req(pr, pr$sf)
+      return(pr$sf)
+    }
+    if (own_upload_active()) {
+      ur <- own_layer_result()
+      req(ur, ur$sf)
+      return(ur$sf)
+    }
+    NULL
+  })
+
+  output$overlay_own_status_ui <- renderUI({
+    req(input$overlay_own_file)
+    ur <- own_layer_result()
+    if (!is.null(ur$error)) {
+      return(tags$p(class = "text-danger", conditionMessage(ur$error)))
+    }
+    req(ur$sf)
+    tags$p(class = "text-muted", sprintf(
+      "%s point%s loaded from %s.",
+      format(nrow(ur$sf), big.mark = ","),
+      if (nrow(ur$sf) == 1L) "" else "s",
+      input$overlay_own_file$name
+    ))
+  })
+
+  # A hidden conditionalPanel keeps the value it had when it was hidden, so
+  # selecting the postal dropdown must actively clear the checkbox rather than
+  # merely stop showing it - otherwise a previously ticked box would keep
+  # overriding the postal selection invisibly.
+  observeEvent(input$overlay_source, {
+    if (identical(input$overlay_source, "postal_upload") &&
+        isTRUE(input$overlay_upload_own)) {
+      updateCheckboxInput(session, "overlay_upload_own", value = FALSE)
+    }
+  })
 
   postal_file_result <- reactive({
     req(input$postal_file)
@@ -1795,12 +2359,16 @@ server <- function(input, output, session) {
     if (!col %in% names(fr$df)) return(NULL)
     codes <- as.character(fr$df[[col]])
     n_input <- length(codes)
+    postal_error <- NULL
     sf_layer <- tryCatch(
       withCallingHandlers(
         ONgeoR::resolve_postal_points(codes, as_sf = TRUE),
         warning = function(w) invokeRestart("muffleWarning")
       ),
-      error = function(e) NULL
+      error = function(e) {
+        postal_error <<- e
+        NULL
+      }
     )
     n_placed <- if (!is.null(sf_layer)) nrow(sf_layer) else 0L
     n_geonames <- if (!is.null(sf_layer) && "point_source" %in% names(sf_layer)) {
@@ -1813,7 +2381,8 @@ server <- function(input, output, session) {
       n_input = n_input,
       n_placed = n_placed,
       n_unmatched = n_input - n_placed,
-      n_geonames = n_geonames
+      n_geonames = n_geonames,
+      error = if (is.null(postal_error)) NULL else describe_retrieval_failure(postal_error)
     )
   })
 
@@ -1871,6 +2440,8 @@ server <- function(input, output, session) {
       cw_result$base_sf <- NULL
       cw_result$overlay_sf <- NULL
       cw_result$previewed <- NULL
+      previewed_bbox(NULL)
+      session$sendCustomMessage("ongeor-data-tab", TRUE)
     }
   }, ignoreInit = TRUE)
 
@@ -1913,6 +2484,7 @@ server <- function(input, output, session) {
     if (!is.null(fr$error)) return(NULL)
     pr <- postal_result()
     req(pr)
+    if (!is.null(pr$error)) return(retrieval_failure_notification(pr$error))
     status <- tags$p(class = "text-muted",
       sprintf("%s input rows, %s placed, %s unmatched.",
         format(pr$n_input, big.mark = ","),
@@ -1942,12 +2514,17 @@ server <- function(input, output, session) {
   # codebase keeps hitting - the user would get a fast, plausible, wrong answer.
   output$census_window_ui <- renderUI({
     req(input$base_layer)
-    if (!is_census_source(input$base_layer)) return(NULL)
+    # Either slot can now hold a windowable layer - census boundaries in the
+    # source slot, postal-code points in the target slot - so the control is
+    # offered whenever either one supports a window.
+    windowable <- c(input$base_layer, effective_overlay_id())
+    windowable <- windowable[vapply(windowable, is_windowable_source, logical(1))]
+    if (length(windowable) == 0L) return(NULL)
     tagList(
       checkboxInput(
         "limit_to_view",
         "Limit to current map view",
-        value = census_window_default(input$base_layer)
+        value = any(vapply(windowable, census_window_default, logical(1)))
       ),
       tags$p(class = "text-muted small mt-n2",
         paste("Retrieves only the features intersecting the visible map extent.",
@@ -1956,11 +2533,41 @@ server <- function(input, output, session) {
     )
   })
 
+  # The ON-Marg option appears only for a source layer that actually has a 2021
+  # ON-Marg equivalent, so it is absent rather than greyed out for the rest.
+  onmarg_geography <- reactive({
+    req(input$base_layer)
+    onmarg_geography_for(input$base_layer)
+  })
+
+  output$onmarg_ui <- renderUI({
+    geography <- onmarg_geography()
+    if (is.na(geography)) return(NULL)
+    tagList(
+      checkboxInput("add_onmarg", "Add ON-Marg measures", FALSE),
+      tags$p(class = "text-muted small mt-n2",
+        paste("Attaches the 2021 Ontario Marginalization Index factor scores",
+          "(and quintiles, where published) for this geography to the source",
+          "layer, so they carry through into the joined result. Published by",
+          "Public Health Ontario; fetched when the run starts."))
+    )
+  })
+
+  # A plain character scalar or NULL, which is what can cross the future
+  # boundary - the reactive itself cannot.
+  requested_onmarg <- function() {
+    if (!isTRUE(isolate(input$add_onmarg))) return(NULL)
+    geography <- onmarg_geography_for(isolate(input$base_layer))
+    if (is.na(geography)) return(NULL)
+    geography
+  }
+
   # NULL means "no window": either the layer does not support one, the user
   # unticked it, or the map has not reported an extent yet.
   requested_bbox <- function() {
     if (!isTRUE(isolate(input$limit_to_view))) return(NULL)
-    if (!is_census_source(isolate(input$base_layer))) return(NULL)
+    slots <- c(isolate(input$base_layer), isolate(effective_overlay_id()))
+    if (!any(vapply(slots, is_windowable_source, logical(1)))) return(NULL)
     map_view_bbox(isolate(input$cw_map_bounds))
   }
 
@@ -2011,12 +2618,19 @@ server <- function(input, output, session) {
   dialog_hint <- new.env(parent = emptyenv())
   dialog_hint$text <- ""
 
-  push_progress <- function(phases, done, ok = TRUE, title = NULL) {
+  # `stopped` means "the run is over as far as the UI is concerned, but a
+  # background phase may still be finishing" - it is what keeps the dialog from
+  # ticking a step that is still running. `note` is the plain-language
+  # explanation shown underneath.
+  push_progress <- function(phases, done, ok = TRUE, title = NULL,
+                            note = NULL, stopped = FALSE) {
     session$sendCustomMessage("ongeor-progress", list(
       phases = as.list(as.character(phases)),
       done = isTRUE(done),
       ok = isTRUE(ok),
       title = title %||% "",
+      note = note %||% "",
+      stopped = isTRUE(stopped),
       hint = dialog_hint$text %||% ""
     ))
   }
@@ -2025,7 +2639,7 @@ server <- function(input, output, session) {
 
   open_progress_dialog <- function(op) {
     dialog_hint$text <- tryCatch(
-      run_hint_text(c(isolate(input$base_layer), isolate(input$overlay_source))),
+      run_hint_text(c(isolate(input$base_layer), isolate(effective_overlay_id()))),
       error = function(e) ""
     )
     showModal(task_progress_modal(op))
@@ -2109,14 +2723,19 @@ server <- function(input, output, session) {
       failed    = paste(what, "failed."),
       cancelled = paste(what, "cancelled."),
       paste(what, state))
+    cancelled <- identical(state, "cancelled")
     push_progress(phases, done = TRUE,
-      ok = identical(state, "completed"), title = title)
+      ok = identical(state, "completed"), title = title,
+      note = if (cancelled) cancel_wait_note else NULL,
+      stopped = cancelled)
   }
 
   observeEvent(preview_state(), {
     st <- preview_state()
     if (st %in% c("completed", "failed", "cancelled")) {
-      unlink(isolate(preview_progress_path()) %||% character())
+      # Phase log only - see clear_preview_run_files() on why the cancel
+      # sentinel must survive this observer.
+      clear_preview_progress_file()
       # "completed" is deliberately NOT finished here. A successful preview is
       # only done once the browser reports the map drawn (await_preview_render),
       # and this observer must not pre-empt that with a premature done = TRUE.
@@ -2142,15 +2761,21 @@ server <- function(input, output, session) {
     removeModal()
   })
 
+  # The generation bump is what makes the UI forget the run; request_cancel()
+  # is what makes the WORKER stop, at its next phase boundary. The detail text
+  # says "stops at its next step" rather than implying an instant halt, because
+  # a download already in flight cannot be interrupted - see new_cancel_path().
   observeEvent(input$cancel_task_btn, {
     if (identical(link_state(), "running")) {
+      request_cancel(isolate(link_cancel_path()))
       link_generation(link_generation() + 1L)
       link_state("cancelled")
-      link_state_detail("Cancelled; the previous run was discarded.")
+      link_state_detail(paste("Cancelling.", cancel_wait_note))
     } else if (identical(preview_state(), "running")) {
+      request_cancel(isolate(preview_cancel_path()))
       preview_generation(preview_generation() + 1L)
       preview_state("cancelled")
-      preview_state_detail("Cancelled; the previous preview was discarded.")
+      preview_state_detail(paste("Cancelling.", cancel_wait_note))
     }
   })
 
@@ -2165,8 +2790,29 @@ server <- function(input, output, session) {
   # out. That is the intermittent "clicking Preview does nothing".
   selected_pair <- reactiveVal(NULL)
 
-  observeEvent(list(input$base_layer, input$overlay_source), {
-    pair <- c(input$base_layer, input$overlay_source)
+  observeEvent(
+    list(input$base_layer, input$overlay_source, input$overlay_upload_own,
+      input$overlay_own_file, input$add_onmarg), {
+    # A momentarily NULL picker is never a real user change - it is the echo
+    # of an updateSelectInput() from the mutual-exclusion observers. Bail out
+    # rather than treating it as one: everything below discards the previewed
+    # layers and bumps the generation counters, which is precisely how the map
+    # ends up with tiles and furniture and no features.
+    if (is.null(input$base_layer) || is.null(input$overlay_source)) {
+      return()
+    }
+    # Fixed length, always. Built with c() from values that can be NULL, this
+    # vector silently SHORTENS instead of carrying a gap, so a transient NULL
+    # made `pair` fail identical() against a perfectly current selected_pair()
+    # and fired the reset for no reason.
+    pair <- c(
+      input$base_layer,
+      effective_overlay_id() %||% "",
+      input$overlay_own_file$name %||% "",
+      # Turning ON-Marg on or off changes the source layer's columns, so a
+      # preview taken under the other setting is stale.
+      if (isTRUE(input$add_onmarg)) "onmarg" else ""
+    )
     if (identical(selected_pair(), pair)) {
       return()
     }
@@ -2192,7 +2838,9 @@ server <- function(input, output, session) {
     cw_result$pairs <- NULL
     cw_result$base_sf <- NULL
     cw_result$overlay_sf <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     cw_result$previewed <- NULL
+    previewed_bbox(NULL)
   }, ignoreInit = TRUE)
 
   # Link is gated on having previewed the CURRENT pair: enabled only when a
@@ -2201,7 +2849,8 @@ server <- function(input, output, session) {
   # now - point-to-point runs nearest matching - so there is no pair gate.
   output$build_btn_ui <- renderUI({
     req(input$base_layer, input$overlay_source)
-    previewed_current <- identical(cw_result$previewed, c(input$base_layer, input$overlay_source))
+    previewed_current <- identical(cw_result$previewed,
+      c(input$base_layer, effective_overlay_id()))
     build_running <- identical(link_state(), "running")
 
     if (build_running) {
@@ -2225,13 +2874,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$preview_btn, {
     req(input$base_layer, input$overlay_source)
-    target <- overlay_request()
-    if (!is.null(target$error) || is.null(target$layer) &&
-        target$id %in% c("postal_upload", "custom_target")) {
-      showNotification(target$error %||% "The target layer is not ready.",
-        type = "error", duration = NULL)
-      return()
-    }
+    supplied_layer <- supplied_target_layer()
+    overlay_id <- effective_overlay_id()
     generation <- preview_generation()
     preview_active_generation(generation)
     path <- new_progress_path()
@@ -2239,18 +2883,38 @@ server <- function(input, output, session) {
     preview_progress_log(character())
     preview_state("running")
     preview_state_detail("Starting.")
-    preview_task$invoke(input$base_layer, input$overlay_source, generation,
-      target$layer, path, requested_bbox())
+    bbox <- requested_bbox()
+    previewed_bbox(bbox)
+    cancel_path <- new_cancel_path()
+    preview_cancel_path(cancel_path)
+    preview_task$invoke(input$base_layer, overlay_id, generation,
+      supplied_layer, path, bbox, cancel_path, requested_onmarg())
   })
 
   observeEvent(preview_task$status(), {
     s <- preview_task$status()
     if (!s %in% c("success", "error")) return()
-    if (!identical(preview_active_generation(), preview_generation())) return()
+    if (!identical(preview_active_generation(), preview_generation())) {
+      clear_preview_run_files()
+      return()
+    }
     result <- tryCatch(preview_task$result(), error = function(e) e)
+    # A cancelled worker is not a failure. In the normal flow the Cancel handler
+    # also bumps the generation, so the guard above already dropped this result
+    # and we never get here - but reporting "Failed" for a run the user stopped
+    # would be a lie about our own state, so classify it explicitly rather than
+    # relying on that ordering holding forever.
+    if (inherits(result, "ongeor_cancelled")) {
+      clear_preview_run_files()
+      preview_state("cancelled")
+      preview_state_detail("Cancelled; preview discarded.")
+      push_progress(isolate(preview_progress_log()), done = TRUE, ok = FALSE,
+        title = "Preview cancelled.")
+      return()
+    }
     if (inherits(result, "error")) {
       described <- describe_retrieval_failure(result)
-      unlink(isolate(preview_progress_path()) %||% character())
+      clear_preview_run_files()
       preview_state("failed")
       preview_state_detail(described$message)
       showNotification(retrieval_failure_notification(described),
@@ -2287,16 +2951,22 @@ server <- function(input, output, session) {
     cw_result$base_sf <- unpack_spatial(result$base_sf)
     cw_result$overlay_sf <- unpack_spatial(result$overlay_sf)
     # A fresh preview invalidates any stale link results - the Data tab
-    # goes empty and the crosswalk/linked-csv and reproduce.R downloads
-    # disable until Link is run again.
+    # goes back to greyed out and the crosswalk/linked-csv and reproduce.R
+    # downloads disable until Link is run again.
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     # Records exactly what was previewed, so the Join button's renderUI
     # can require the current picker values to match before enabling -
     # changing either picker after a preview re-greys Link. Only set on
     # success; an error path below leaves this untouched.
     cw_result$previewed <- c(result$base_id, result$overlay_id)
+    # Always redraw on a successful preview, even when nothing the map reads
+    # actually changed. Without this the render acknowledgement can never
+    # arrive either, and the progress dialog sits on its last spinner until
+    # the render timeout gives up.
+    cw_result$render_token <- cw_result$render_token + 1L
     preview_state("completed")
     preview_state_detail("Both layers are on the map.")
     # The terminal push is NOT made here. The map payload goes out in this same
@@ -2307,7 +2977,7 @@ server <- function(input, output, session) {
     # observeEvent(preview_state()): observers invalidated inside this
     # promise-resolution flush are never re-flushed.
     await_preview_render(phases)
-    unlink(isolate(preview_progress_path()) %||% character())
+    clear_preview_run_files()
   }, ignoreInit = TRUE)
 
   # Join asks first. build_btn only opens the confirmation; confirm_join_btn
@@ -2317,10 +2987,10 @@ server <- function(input, output, session) {
     req(input$base_layer, input$overlay_source)
     showModal(join_confirm_modal(
       source_id = input$base_layer,
-      target_id = input$overlay_source,
+      target_id = effective_overlay_id(),
       source_sf = cw_result$base_sf,
       target_sf = cw_result$overlay_sf,
-      kinds = c(geom_kind(input$base_layer), geom_kind(input$overlay_source))
+      kinds = c(geom_kind(input$base_layer), geom_kind(effective_overlay_id()))
     ))
   })
 
@@ -2333,16 +3003,10 @@ server <- function(input, output, session) {
     req(input$base_layer, input$overlay_source)
     requested_inputs <- list(
       base_layer = input$base_layer,
-      overlay_source = input$overlay_source
+      overlay_source = effective_overlay_id(),
+      onmarg = requested_onmarg()
     )
-    target <- overlay_request()
-    if (!is.null(target$error) || is.null(target$layer) &&
-        target$id %in% c("postal_upload", "custom_target")) {
-      removeModal()
-      showNotification(target$error %||% "The target layer is not ready.",
-        type = "error", duration = NULL)
-      return()
-    }
+    supplied_layer <- supplied_target_layer()
     has_current_result <- !is.null(cw_result$crosswalk) ||
       !is.null(cw_result$linked)
     if (identical(link_state(), "completed") &&
@@ -2365,17 +3029,21 @@ server <- function(input, output, session) {
     link_state("running")
     link_state_detail("Starting.")
     link_progress_path(new_progress_path())
+    link_cancel_path(new_cancel_path())
     link_progress_log(character())
     cw_result$crosswalk <- NULL
     cw_result$linked <- NULL
     cw_result$pairs <- NULL
+    session$sendCustomMessage("ongeor-data-tab", TRUE)
     build_task$invoke(
       input$base_layer,
-      input$overlay_source,
+      effective_overlay_id(),
       generation,
-      target$layer,
+      supplied_layer,
       isolate(link_progress_path()),
-      requested_bbox()
+      isolate(previewed_bbox()),
+      isolate(link_cancel_path()),
+      requested_onmarg()
     )
   })
 
@@ -2384,9 +3052,11 @@ server <- function(input, output, session) {
     if (!s %in% c("success", "error")) return()
     current_inputs <- list(
       base_layer = input$base_layer,
-      overlay_source = input$overlay_source
+      overlay_source = effective_overlay_id(),
+      onmarg = requested_onmarg()
     )
     if (!identical(link_active_inputs(), current_inputs)) {
+      clear_link_run_files()
       link_state("cancelled")
       link_state_detail("Inputs changed; the previous run was discarded.")
       cw_result$crosswalk <- NULL
@@ -2394,9 +3064,19 @@ server <- function(input, output, session) {
       cw_result$pairs <- NULL
       return()
     }
-    if (!identical(link_active_generation(), link_generation())) return()
-    unlink(isolate(link_progress_path()) %||% character())
+    if (!identical(link_active_generation(), link_generation())) {
+      clear_link_run_files()
+      return()
+    }
+    clear_link_run_files()
     result <- tryCatch(build_task$result(), error = function(e) e)
+    # See the matching note in the preview observer: a cancelled worker is not a
+    # failure, and must not be reported as one.
+    if (inherits(result, "ongeor_cancelled")) {
+      link_state("cancelled")
+      link_state_detail("Cancelled; results discarded.")
+      return()
+    }
     if (inherits(result, "error")) {
       described <- describe_retrieval_failure(result)
       link_state("failed")
@@ -2417,7 +3097,7 @@ server <- function(input, output, session) {
     cw_result$overlay_sf  <- overlay_sf
     link_state("completed")
     link_state_detail("Results and downloads are ready.")
-    bslib::nav_show("main_tabs", "data", session = session)
+    session$sendCustomMessage("ongeor-data-tab", FALSE)
   }, ignoreInit = TRUE)
 
   # The map renders at app load - before any preview - carrying
@@ -2426,20 +3106,27 @@ server <- function(input, output, session) {
   # furniture in the overlay list. The view is pinned to the Ontario-wide
   # extent of the bundled PHU outline on every render and is never re-fit
   # to the selected sources' extent.
-  link_map <- reactive({
+  #
+  # Extracted from the reactive as a plain function so the map.html
+  # downloadHandler can build a second copy from simplify_for_export()'d
+  # geometry without duplicating this assembly logic. The live map below
+  # calls it unsimplified; nothing about the live path changed.
+  build_link_map <- function(base_sf, overlay_sf, previewed, pairs) {
     layers <- list()
     styles <- list()
-    layer_labels <- c(
-      "Source layer" = source_layer_display_name(input$base_layer),
-      "Target layer" = target_layer_display_name(
-        input$overlay_source, input$overlay_own_file
+    if (!is.null(base_sf) && !is.null(overlay_sf)) {
+      # Named from the previewed ids so the group names match what is actually
+      # drawn, and so the restyle observer can rebuild the same keys.
+      group <- preview_group_labels(previewed)
+      layers <- stats::setNames(
+        list(base_sf, overlay_sf), c(group$base, group$overlay)
       )
-    )
-    if (!is.null(cw_result$base_sf) && !is.null(cw_result$overlay_sf)) {
-      layers <- list("Source layer" = cw_result$base_sf, "Target layer" = cw_result$overlay_sf)
-      styles <- list(
-        "Source layer" = read_layer_style(input, "base", layer_geom(cw_result$base_sf), accent = "#2a78d6"),
-        "Target layer" = read_layer_style(input, "overlay", layer_geom(cw_result$overlay_sf), accent = "#1baf7a")
+      styles <- stats::setNames(
+        list(
+          read_layer_style(input, "base", layer_geom(base_sf), accent = "#2a78d6"),
+          read_layer_style(input, "overlay", layer_geom(overlay_sf), accent = "#1baf7a")
+        ),
+        c(group$base, group$overlay)
       )
     }
     # Suppress PHU_simple only when phu_boundaries is actually DRAWN, not
@@ -2447,12 +3134,12 @@ server <- function(input, output, session) {
     # layer, so keying suppression off the selection hid the furniture on
     # every fresh load - the exact case it exists for. Nothing is drawn from
     # a selection until a preview succeeds.
-    drawn_ids <- if (length(layers)) cw_result$previewed else character(0)
+    drawn_ids <- if (length(layers)) previewed else character(0)
     furniture <- furniture_layers(drawn_ids)
     # A nearest (point-to-point) result draws connector lines between matched
     # points; add_nearest_connectors() also owns the layers control in that
     # case, so render_styled_map() skips its own (exactly one control either way).
-    nearest_run <- is_nearest_result(cw_result$pairs)
+    nearest_run <- is_nearest_result(pairs)
     map <- render_styled_map(
       layers, styles,
       add_control = !nearest_run,
@@ -2460,7 +3147,7 @@ server <- function(input, output, session) {
       layer_labels = layer_labels
     )
     if (nearest_run) {
-      connectors <- nearest_connectors(cw_result$base_sf, cw_result$overlay_sf, cw_result$pairs)
+      connectors <- nearest_connectors(base_sf, overlay_sf, pairs)
       conn_style <- list(color = "#52514e", weight = 1, opacity = 0.7)
       map <- add_nearest_connectors(
         map, layers, connectors, conn_style, furniture = furniture,
@@ -2475,12 +3162,84 @@ server <- function(input, output, session) {
     zoom_inset <- 0.12
     inset_x <- (ontario[["xmax"]] - ontario[["xmin"]]) * zoom_inset / 2
     inset_y <- (ontario[["ymax"]] - ontario[["ymin"]]) * zoom_inset / 2
-    map <- leaflet::fitBounds(
+    leaflet::fitBounds(
       map,
       lng1 = ontario[["xmin"]] + inset_x, lat1 = ontario[["ymin"]] + inset_y,
       lng2 = ontario[["xmax"]] - inset_x, lat2 = ontario[["ymax"]] - inset_y
     )
-    map
+  }
+
+  # The map rebuild is deliberately blind to the restylable style inputs
+  # (line/fill colour, fill opacity, point colour): the ongeor-restyle
+  # observer below applies those to already-drawn layers in the browser, so
+  # nudging a colour slider no longer costs a full rebuild. Geometry-bearing
+  # state stays a real (un-isolated) dependency so preview/join results keep
+  # updating the map; only the rebuild-class style inputs are touched
+  # explicitly because they cannot be restyled in place (circle radius and
+  # point shape change geometry, addRasterImage bakes a bitmap). isolate()
+  # wraps ONLY the build call - wrapping the cw_result reads above would stop
+  # the map updating on preview/join. The download handler calls
+  # build_link_map() outside reactive context and is unaffected.
+  link_map <- reactive({
+    base_sf    <- cw_result$base_sf
+    overlay_sf <- cw_result$overlay_sf
+    previewed  <- cw_result$previewed
+    pairs      <- cw_result$pairs
+    # Read, deliberately unused: see the render_token note on cw_result.
+    cw_result$render_token
+    for (nm in c("base_point_size", "base_point_shape",
+                 "base_raster_palette", "base_raster_opacity",
+                 "overlay_point_size", "overlay_point_shape",
+                 "overlay_raster_palette", "overlay_raster_opacity")) {
+      input[[nm]]
+    }
+    isolate(build_link_map(base_sf, overlay_sf, previewed, pairs))
+  })
+
+  # Pushes colour/opacity changes onto already-drawn layers without a rebuild.
+  # Style is keyed per group and per geometry kind via the same layer_geom()
+  # token build_link_map() uses, so the fields sent always match what was
+  # drawn. Slots without a loaded layer send nothing.
+  #
+  # Values come from read_layer_style() rather than raw input reads, for the
+  # reason that function documents: its fields fall back to defaults when a
+  # control has not been rendered yet (a picker changed after a build re-renders
+  # the style UI, and the inputs are briefly absent). Reading input directly
+  # here sent {"color":null,"fillColor":null,"fillOpacity":null} in that window;
+  # Leaflet's setStyle merges those into the path options, where an invalid
+  # fill-opacity resolves to fully opaque - a black flash on the polygons.
+  # Going through read_layer_style() also guarantees a restyle and a rebuild
+  # agree, since the rebuild reads its style the same way, and keeps the input
+  # field names in exactly one place.
+  restyle_payload <- function(slot, layer, accent) {
+    if (is.null(layer)) return(NULL)
+    kind <- layer_geom(layer)
+    style <- read_layer_style(input, slot, kind, accent = accent)
+    if (identical(kind, "polygon")) {
+      list(color = style$line_color, fillColor = style$fill_color,
+        fillOpacity = style$fill_opacity)
+    } else if (identical(kind, "point")) {
+      # Circle markers are drawn with stroke = FALSE so `color` is inert there;
+      # square points are Rectangles, which do paint their border.
+      list(color = style$point_color, fillColor = style$point_color)
+    } else {
+      # Raster: addRasterImage() bakes a bitmap, so palette/opacity changes stay
+      # on the rebuild path and there is nothing to restyle in place.
+      NULL
+    }
+  }
+
+  observe({
+    styles <- list()
+    # Same derivation as build_link_map(), from the same previewed ids: the
+    # restyle handler looks the group up by name, so a mismatch here would
+    # silently restyle nothing.
+    group <- preview_group_labels(cw_result$previewed)
+    base_style <- restyle_payload("base", cw_result$base_sf, "#2a78d6")
+    if (!is.null(base_style)) styles[[group$base]] <- base_style
+    overlay_style <- restyle_payload("overlay", cw_result$overlay_sf, "#1baf7a")
+    if (!is.null(overlay_style)) styles[[group$overlay]] <- overlay_style
+    if (length(styles)) session$sendCustomMessage("ongeor-restyle", styles)
   })
 
   # The widget reports back when it has finished drawing. Leaflet renders the
@@ -2525,11 +3284,32 @@ server <- function(input, output, session) {
         });
       }")
   })
-  # Shows whichever mode the last run produced: the target-level table
-  # (build_crosswalk, or summarise_by_target() for intersection/nearest) or a
-  # linked values table (raster runs via link()).
+  # The full joined result: the target layer's own attributes, the join
+  # provenance the crosswalk records, and the matched source feature's
+  # attributes under `src_`. Both the Data tab and the Shapes download read
+  # this, so what a user sees on screen is what they get in the file.
+  joined_target <- reactive({
+    merged <- merge_target_attributes(
+      cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
+    )
+    merge_source_attributes(merged, cw_result$base_sf, cw_result$crosswalk)
+  })
+
+  # Shows the joined result when there is one. Falls back to the raw run table
+  # only when the attributes cannot be merged onto the target - a raster
+  # target has no attribute table to merge onto, and merge_target_attributes()
+  # returns NULL for it.
+  #
+  # This used to render cw_result$crosswalk directly, which is the fixed
+  # assignment/provenance table and never carries either layer's attributes.
+  # It looked like a joined table while being nothing of the sort.
   output$cw_table <- DT::renderDataTable({
-    tbl <- cw_result$crosswalk %||% cw_result$linked
+    merged <- joined_target()
+    tbl <- if (!is.null(merged)) {
+      sf::st_drop_geometry(merged)
+    } else {
+      cw_result$crosswalk %||% cw_result$linked
+    }
     req(tbl)
     tbl
   }, rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
@@ -2555,9 +3335,7 @@ server <- function(input, output, session) {
   output$dl_cw_target <- downloadHandler(
     filename = function() "target_shapes.zip",
     content = function(file) {
-      merged <- merge_target_attributes(
-        cw_result$overlay_sf, cw_result$crosswalk, cw_result$linked
-      )
+      merged <- joined_target()
       req(merged)
       staging <- tempfile("shapes_stage")
       dir.create(staging)
@@ -2607,7 +3385,30 @@ server <- function(input, output, session) {
     filename = function() "map.html",
     content = function(file) {
       req(cw_result$base_sf, cw_result$overlay_sf)
-      htmlwidgets::saveWidget(link_map(), file, selfcontained = TRUE)
+      # Coordinate JSON, not library overhead, dominates map.html: a live
+      # full-resolution PHU boundary alone measured 16.5 of 17.8 MB. Two
+      # independent cuts apply, both export-only - cw_result, the live map,
+      # and the Data/Table/Shape outputs are never touched:
+      #  1. simplify_for_export() - drops sub-1km2 polygon parts (lakes and
+      #     islands) and simplifies in a projected CRS, the same recipe
+      #     ONgeoR itself uses to build the bundled PHU_simple layer. Cut a
+      #     607,848-vertex PHU layer to 20,650 (3.4% of original), area
+      #     deviation 0.056%. Built through build_link_map() - the same
+      #     assembly the live map uses - so this map is structurally
+      #     identical to the live one, just fed simplified geometry.
+      #  2. TOJSON_ARGS digits = 6 (~11cm precision) on the widget object,
+      #     set per-widget rather than via the global htmlwidgets option so
+      #     the live interactive map keeps full precision.
+      # Real end-to-end download after both, default source/target pair
+      # (phu_boundaries + moh_service_locations): 1.4 MB, down from 17.8 MB.
+      map_obj <- build_link_map(
+        simplify_for_export(cw_result$base_sf),
+        simplify_for_export(cw_result$overlay_sf),
+        cw_result$previewed,
+        cw_result$pairs
+      )
+      attr(map_obj$x, "TOJSON_ARGS") <- list(digits = 6)
+      htmlwidgets::saveWidget(map_obj, file, selfcontained = TRUE)
     }
   )
   output$dl_cw_script <- downloadHandler(
@@ -2652,14 +3453,17 @@ server <- function(input, output, session) {
         # disabled for all of those (a populated pairs table marks the latter).
         list(id = "dl_cw_script", label = "Script", title = "reproduce.R",
           ready = has_rows(cw_result$crosswalk) && is.null(cw_result$pairs) &&
-            !identical(input$overlay_source, "postal_upload"))
+            !identical(effective_overlay_id(), "postal_upload") &&
+            !identical(effective_overlay_id(), "own_upload"))
       )),
-      # The exported map carries the furniture layers too; say so here so
-      # the addition is not silent.
+      # The exported map carries the furniture layer too, and its polygons
+      # are simplified for file size; say so here so neither is silent.
+      # HIVE is not furniture (see furniture_layers()) - only PHU_simple is.
       tags$p(class = "text-muted",
-        paste("map.html also includes the bundled PHU_simple and HIVE",
-          "reference layers (each hidden only while its full-resolution",
-          "source counterpart is selected)."))
+        paste("map.html also includes the bundled PHU_simple reference",
+          "layer (hidden only while a full-resolution PHU boundary is",
+          "selected). Polygon boundaries are simplified for file size; the",
+          "Table and Shape downloads use full-resolution geometry."))
     )
   })
 
