@@ -383,11 +383,10 @@ color_choices <- c(
 # naming a group with no layer CREATES an empty feature group and attaches it
 # to the map. The control then walks this vector in order and keeps only the
 # first visible base layer, which removes the empty one again. That is why
-# "Light" must stay FIRST and "None" LAST: the order is what makes the
+# "OpenStreetMap" must stay FIRST and "None" LAST: the order is what makes the
 # no-basemap entry behave, not a special case in leaflet.
 basemap_groups <- c(
-  "Light", "Dark", "OpenStreetMap", "Satellite",
-  "Topographic", "Streets", "Voyager", "None"
+  "OpenStreetMap", "None"
 )
 
 # Emits the geometry-specific style controls for a single layer slot. `prefix`
@@ -1413,16 +1412,9 @@ retrieval_failure_notification <- function(described) {
   )
 }
 
-# Adds every real basemap choice as its own named tile group. "Light" is
-# added first, so it is the default visible base layer.
+# Add the sole no-key basemap as the default visible base layer.
 base_leaflet_layers <- function(map) {
-  map <- leaflet::addProviderTiles(map, "CartoDB.Positron", group = "Light")
-  map <- leaflet::addProviderTiles(map, "CartoDB.DarkMatter", group = "Dark")
   map <- leaflet::addProviderTiles(map, "OpenStreetMap.Mapnik", group = "OpenStreetMap")
-  map <- leaflet::addProviderTiles(map, "Esri.WorldImagery", group = "Satellite")
-  map <- leaflet::addProviderTiles(map, "Esri.WorldTopoMap", group = "Topographic")
-  map <- leaflet::addProviderTiles(map, "Esri.WorldStreetMap", group = "Streets")
-  map <- leaflet::addProviderTiles(map, "CartoDB.Voyager", group = "Voyager")
   map
 }
 
@@ -1618,18 +1610,12 @@ render_styled_map <- function(layers, styles, add_control = TRUE,
   for (nm in names(furniture)) {
     map <- add_furniture_layer(map, furniture[[nm]], nm)
   }
-  # Only "Light" (added first, above) starts visible; hide the other real
-  # tile groups so the layers control's radio behavior starts from a single
-  # clean default instead of stacking all tile layers. HIVE furniture also
-  # starts hidden (unchecked) - its geometry ships to the browser but is
-  # not rendered until the user toggles it on.
+  # OpenStreetMap starts visible. HIVE furniture starts hidden (unchecked) -
+  # its geometry ships to the browser but is not rendered until the user
+  # toggles it on.
   map <- leaflet::hideGroup(
     map,
-    c(
-      "Dark", "OpenStreetMap", "Satellite",
-      "Topographic", "Streets", "Voyager",
-      "HIVE"
-    )
+    "HIVE"
   )
   if (add_control) {
     # names() on an empty list is NULL, and c(NULL, NULL) stays NULL, which

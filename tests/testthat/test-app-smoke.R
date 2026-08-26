@@ -144,7 +144,7 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
 # retrieval and no network. Basemap switching is therefore exercised on the
 # initial furniture map directly and this test runs offline - there is no
 # opt-in gate.
-test_that("native map control switches every core basemap including None", {
+test_that("native map control switches OpenStreetMap and None", {
   app <- shinytest2::AppDriver$new(
     app_dir = dirname(shiny_app_file()),
     name = "app-basemap-switching",
@@ -163,6 +163,16 @@ test_that("native map control switches every core basemap including None", {
 
   label_selector <- "#cw_map .leaflet-control-layers-base label"
   tile_selector <- "#cw_map .leaflet-tile-pane img.leaflet-tile"
+
+  expect_setequal(
+    app$get_js(
+      paste0(
+        "Array.from(document.querySelectorAll('", label_selector,
+        "')).map(function(item) { return item.textContent.trim(); })"
+      )
+    ),
+    c("OpenStreetMap", "None")
+  )
 
   select_basemap <- function(group, has_tiles) {
     click_script <- sprintf(
@@ -219,9 +229,6 @@ test_that("native map control switches every core basemap including None", {
     }
   }
 
-  select_basemap("Dark", has_tiles = TRUE)
-  select_basemap("Light", has_tiles = TRUE)
   select_basemap("OpenStreetMap", has_tiles = TRUE)
-  select_basemap("Satellite", has_tiles = TRUE)
   select_basemap("None", has_tiles = FALSE)
 })
