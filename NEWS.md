@@ -69,16 +69,13 @@
   functions are unaffected and remain available in `ONgeoR`
   (`resolve_postal()`, `normalize_postal_code()`).
 
-# ONgeoRapp 0.1.0
+# ONgeoRapp (standalone app source)
 
-* Initial release. The Shiny application was extracted from the `ONgeoR`
-  package (which retained everything else) so that `ONgeoR` can be submitted
-  to CRAN as a data-and-linking package without carrying the application, its
-  `shiny`/`bslib`/`DT` dependencies, or the browser smoke test in its tarball.
+* The Shiny application is maintained here as standalone app source while the
+  installable R package and its `run_app()` entry point remain in `ONgeoR`.
 
-* `run_app()` moves here unchanged apart from the package it looks in for the
-  application directory. The application source under `inst/shiny/` and the
-  `testServer` and browser smoke suites move with it.
+* The application source and its `testServer` and browser smoke suites are
+  synchronized with the copy bundled by `ONgeoR`.
 
-* The application depends on `ONgeoR` through its exported functions only, so
-  the split required no change to any spatial code.
+* The application uses `ONgeoR` through its exported functions only; ONgeoR
+  bundles the synchronized app source and exposes `ONgeoR::run_app()`.

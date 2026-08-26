@@ -7,16 +7,12 @@ on:
 name: manifest-freshness
 
 # Connect Cloud takes the app files from this repository's branch tip but
-# resolves ONgeoR from the RemoteSha recorded in inst/shiny/manifest.json. If
+# resolves ONgeoR from the RemoteSha recorded in manifest.json. If
 # ONgeoR has moved since that SHA the deploy silently serves new app files
 # against a stale package - no error, just wrong behaviour.
 #
-# NOTE - this differs from the pre-split version of this check. When the app
-# lived inside the ONgeoR repository the pinned SHA was a commit in this repo's
-# own history, so the check was a local `git diff SHA..HEAD -- R/`. After the
-# split the pinned SHA belongs to lennon-li/ONgeoR and is NOT in this
-# repository's history, so the comparison has to be made against that
-# repository's tip instead.
+# The pinned SHA belongs to lennon-li/ONgeoR and is not in this repository's
+# history, so the comparison is made against that repository's tip.
 
 jobs:
   manifest-freshness:
@@ -27,7 +23,7 @@ jobs:
       - name: Check the manifest pins the current ONgeoR tip
         run: |
           set -euo pipefail
-          MANIFEST=inst/shiny/manifest.json
+          MANIFEST=manifest.json
 
           if [ ! -f "$MANIFEST" ]; then
             echo "No $MANIFEST - nothing to check."
@@ -73,7 +69,7 @@ jobs:
             echo "Regenerate the manifest:"
             echo ""
             echo "  1. Rscript -e 'pak::pkg_install(\"github::lennon-li/ONgeoR\")'"
-            echo "  2. Rscript -e 'rsconnect::writeManifest(appDir = \"inst/shiny\", appPrimaryDoc = \"app.R\")'"
+            echo "  2. Rscript -e 'rsconnect::writeManifest(appDir = \".\", appPrimaryDoc = \"app.R\")'"
             echo "  3. confirm the new RemoteSha matches ONgeoR's tip, then commit and push"
             echo ""
             echo "A manifest generated from a LOCAL source install is rejected -"

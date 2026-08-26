@@ -35,14 +35,16 @@ shiny_fixture_layers <- function() {
 }
 
 shiny_app_file <- function() {
+  app_root <- Sys.getenv("ONgeoRAPP_ROOT", unset = "")
+  if (!nzchar(app_root)) app_root <- getOption("ONgeoRapp.app_root")
   candidates <- c(
-    testthat::test_path("..", "..", "inst", "shiny", "app.R"),
-    file.path(getwd(), "inst", "shiny", "app.R"),
-    system.file("shiny", "app.R", package = "ONgeoRapp")
+    if (nzchar(app_root)) file.path(app_root, "app.R"),
+    testthat::test_path("..", "..", "app.R"),
+    file.path(getwd(), "app.R")
   )
   existing <- candidates[file.exists(candidates)]
   if (length(existing) == 0L) {
-    rlang::abort("Could not locate inst/shiny/app.R.")
+    rlang::abort("Could not locate app.R.")
   }
   normalizePath(existing[[1]], mustWork = TRUE)
 }
