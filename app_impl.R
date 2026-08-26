@@ -1705,7 +1705,11 @@ ui <- bslib::page_fillable(
     sidebar = bslib::sidebar(
       width = 300,
       tags$div(class = "sidebar-brand",
-        tags$img(src = "logo.png", alt = "ONgeoR")),
+        tags$img(src = "logo.png", alt = "ONgeoR"),
+        tags$small(
+          class = "sidebar-version",
+          paste0("Version ", as.character(utils::packageVersion("ONgeoR")))
+        )),
       tags$div(class = "slot-block slot-overlay",
         selectInput("overlay_source", "1. Target layer (points)",
           choices = target_choices_grouped(), selected = "moh_service_locations"),

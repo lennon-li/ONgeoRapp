@@ -379,6 +379,14 @@ body {
   width: 68px;
 }
 
+.sidebar-version {
+  color: var(--text-muted);
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+
 /* Preview gets its own color identity, distinct from the primary Link
    button: green = "look first" (non-committing), blue = "commit". */
 .btn-preview {

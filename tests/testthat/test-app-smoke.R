@@ -68,9 +68,16 @@ withr::defer(
 # HEAD and its parent while bare chromote launched fine, and at 60 s the same
 # app loads in ~2 s and completes a preview in ~42 s.
 #
-# Set on the shared default object rather than by passing a new Chrome to each
-# AppDriver, so both tests here reuse one browser, and restored afterwards so a
-# developer's existing chromote session is left as it was found.
+# Set the Chrome startup timeout before creating the shared default object.
+# `chromote::default_chromote_object()` launches Chrome immediately, so setting
+# the object's command timeout afterwards cannot prevent a slow CI startup
+# failure. Restore both settings when this test file finishes.
+chromote_startup_timeout_before <- getOption("chromote.timeout")
+options(chromote.timeout = 60)
+withr::defer(
+  options(chromote.timeout = chromote_startup_timeout_before),
+  envir = testthat::teardown_env()
+)
 chromote_object <- chromote::default_chromote_object()
 chromote_timeout_before <- chromote_object$default_timeout
 chromote_object$default_timeout <- 60
@@ -93,6 +100,11 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
   sidebar <- app$get_html(".sidebar")
   expect_match(sidebar, "sidebar-brand", fixed = TRUE)
   expect_match(sidebar, "logo.png", fixed = TRUE)
+  expect_match(
+    sidebar,
+    paste0("Version ", as.character(utils::packageVersion("ONgeoR"))),
+    fixed = TRUE
+  )
 
   # No header bar of any kind: neither a navbar element nor the .app-brand div
   # that briefly carried the logo above the content. A header costs vertical
