@@ -48,6 +48,17 @@ rsconnect::writeManifest(appDir = ".", appPrimaryDoc = "app.R")
 A manifest generated from a *local* source install is rejected — `ONgeoR` must
 be installed from GitHub so its `DESCRIPTION` carries `RemoteType`/`RemoteSha`.
 
+Publish this repository's root directory, with `app.R` as the primary document.
+Do not publish the `ONgeoR` package directory itself; it is not a Shiny app:
+
+```r
+rsconnect::deployApp(
+  appDir = "/path/to/ONgeoRapp",
+  appPrimaryDoc = "app.R",
+  appName = "biostats-ongeor"
+)
+```
+
 ## License
 
 MIT © Lennon Li
