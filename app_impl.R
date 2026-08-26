@@ -377,7 +377,8 @@ color_choices <- c(
 )
 
 # basemap_groups defines the display order for the native Leaflet control.
-# "None" intentionally has no associated tile layer.
+# "None" intentionally has no associated tile layer. The Esri layer uses the
+# public legacy World Street Map tiles, which carry attribution but no API key.
 #
 # Leaflet resolves base groups with getLayerGroup(g, ensureExists = TRUE), so
 # naming a group with no layer CREATES an empty feature group and attaches it
@@ -386,7 +387,7 @@ color_choices <- c(
 # "OpenStreetMap" must stay FIRST and "None" LAST: the order is what makes the
 # no-basemap entry behave, not a special case in leaflet.
 basemap_groups <- c(
-  "OpenStreetMap", "None"
+  "OpenStreetMap", "Esri World Street Map", "None"
 )
 
 # Emits the geometry-specific style controls for a single layer slot. `prefix`
@@ -1412,9 +1413,14 @@ retrieval_failure_notification <- function(described) {
   )
 }
 
-# Add the sole no-key basemap as the default visible base layer.
+# Add no-key basemaps; OpenStreetMap remains the default visible base layer.
 base_leaflet_layers <- function(map) {
   map <- leaflet::addProviderTiles(map, "OpenStreetMap.Mapnik", group = "OpenStreetMap")
+  map <- leaflet::addProviderTiles(
+    map,
+    "Esri.WorldStreetMap",
+    group = "Esri World Street Map"
+  )
   map
 }
 

@@ -156,7 +156,7 @@ test_that("Shiny app boots and exposes its offline workflow controls", {
 # retrieval and no network. Basemap switching is therefore exercised on the
 # initial furniture map directly and this test runs offline - there is no
 # opt-in gate.
-test_that("native map control switches OpenStreetMap and None", {
+test_that("native map control switches OpenStreetMap, Esri, and None", {
   app <- shinytest2::AppDriver$new(
     app_dir = dirname(shiny_app_file()),
     name = "app-basemap-switching",
@@ -183,7 +183,7 @@ test_that("native map control switches OpenStreetMap and None", {
         "')).map(function(item) { return item.textContent.trim(); })"
       )
     ),
-    c("OpenStreetMap", "None")
+    c("OpenStreetMap", "Esri World Street Map", "None")
   )
 
   select_basemap <- function(group, has_tiles) {
@@ -242,5 +242,6 @@ test_that("native map control switches OpenStreetMap and None", {
   }
 
   select_basemap("OpenStreetMap", has_tiles = TRUE)
+  select_basemap("Esri World Street Map", has_tiles = TRUE)
   select_basemap("None", has_tiles = FALSE)
 })
