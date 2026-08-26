@@ -236,15 +236,19 @@ crosswalk_result_columns <- 14L
 # joined rather than being a fixed constant. summarise_by_target() emits 13
 # fixed columns, one src_*/tgt_* column per attribute of each layer, and 4
 # provenance columns; the build_crosswalk path keeps its fixed schema above.
+# Add the raw target layer's columns because the downloadable target file
+# retains those columns alongside the joined table.
 result_column_width <- function(source_sf, target_sf, kinds) {
   if ("raster" %in% kinds) {
     return(NA_integer_)
   }
   n_attr <- function(layer) max(ncol(layer) - 1L, 0L)
+  target_columns <- ncol(target_sf)
   if (all(kinds == "polygon") || all(kinds == "point")) {
-    return(17L + n_attr(source_sf) + n_attr(target_sf))
+    return(target_columns + 17L + n_attr(source_sf) + n_attr(target_sf))
   }
-  crosswalk_result_columns + n_attr(source_sf) + n_attr(target_sf)
+  target_columns + crosswalk_result_columns + n_attr(source_sf) +
+    n_attr(target_sf)
 }
 
 # Human-readable "N features x M attributes" for a retrieved layer. Attributes
@@ -887,9 +891,10 @@ merge_source_attributes <- function(merged_sf, source_sf, crosswalk = NULL) {
   if (is.na(id_col) || !id_col %in% names(source_sf)) return(merged_sf)
 
   source_attrs <- sf::st_drop_geometry(source_sf)
-  # The id column is already present as to_id; repeating it adds no
-  # information and one more column to scroll past.
-  source_attrs <- source_attrs[, setdiff(names(source_attrs), id_col), drop = FALSE]
+  # Keep the source id as src_<id column> as well as the join's to_id. The
+  # latter is the normalized assignment field; the former is the source
+  # layer's actual attribute, and omitting it violates the all-source-columns
+  # contract of the target export.
   if (ncol(source_attrs) == 0L) return(merged_sf)
 
   idx <- match(as.character(merged_sf$to_id), as.character(source_sf[[id_col]]))
@@ -2151,6 +2156,24 @@ server <- function(input, output, session) {
   link_progress_log <- reactiveVal(character())
 
   # --- Postal upload handling ------------------------------------------
+
+  # This output is deliberately registered even before a file is selected:
+  # the target picker only supplies the route, while this panel supplies the
+  # actual postal-code file. Previously the server retained the readers and
+  # status outputs but omitted this output entirely, leaving the selected
+  # postal route with no fileInput in the browser.
+  output$postal_upload_ui <- renderUI({
+    if (!identical(input$overlay_source, "postal_upload")) return(NULL)
+    tagList(
+      fileInput(
+        "postal_file", "Upload postal-code file", buttonLabel = "Browse...",
+        placeholder = "CSV, Excel (.xlsx or .xls)",
+        accept = c(".csv", ".xlsx", ".xls")
+      ),
+      uiOutput("postal_column_ui"),
+      uiOutput("postal_status_ui")
+    )
+  })
 
   # --- Target layer supplied by the user -----------------------------------
   # Two mutually exclusive ways to replace the dropdown target: the postal-code
