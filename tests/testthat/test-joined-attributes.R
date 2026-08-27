@@ -30,8 +30,24 @@ test_that("merge_source_attributes appends the matched source feature's columns"
     out$src_PHU_NAME_ENG,
     c("Fixture Health Unit 1", "Fixture Health Unit 2")
   )
-  # The key itself is already carried as to_id; repeating it adds nothing.
-  expect_false("src_PHU_ID" %in% names(out))
+  # Keep the source key under src_* as well. The target's `to_id` is useful for
+  # the join contract, but it must not be the only representation of a source
+  # column in the exported target file.
+  expect_true("src_PHU_ID" %in% names(out))
+  expect_identical(out$src_PHU_ID, c("P1", "P2"))
+})
+
+test_that("the join confirmation counts the target export columns", {
+  env <- load_shiny_app_env()
+  source <- fixture_polygons()
+  target <- fixture_points()
+
+  expected <- ncol(target) + 14L +
+    (ncol(source) - 1L) + (ncol(target) - 1L)
+  expect_identical(
+    env$result_column_width(source, target, c("polygon", "point")),
+    expected
+  )
 })
 
 test_that("merge_source_attributes reports an unmatched target as NA, not a dropped row", {

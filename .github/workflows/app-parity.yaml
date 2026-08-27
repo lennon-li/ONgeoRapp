@@ -1,0 +1,92 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+name: app-parity
+
+# ONgeoRapp is the standalone copy of ONgeoR's bundled Shiny application.
+# Keeping the shared files byte-identical prevents app fixes and their tests
+# from silently landing in only one repository.
+
+jobs:
+  app-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check shared app files match ONgeoR
+        run: |
+          set -euo pipefail
+
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/lennon-li/ONgeoR.git ongeor-src
+          UPSTREAM=$(git -C ongeor-src rev-parse origin/main)
+
+          echo "ONgeoR main tip: $UPSTREAM"
+
+          # Scratch lists go to a temp dir so a local run of this same script
+          # never leaves stray .txt files in the working tree.
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+
+          differences=()
+          compare_file() {
+            local app_path=$1
+            local package_path=$2
+
+            if ! cmp -s "$app_path" \
+              <(git -C ongeor-src show "$UPSTREAM:$package_path"); then
+              differences+=("$app_path")
+            fi
+          }
+
+          compare_file app.R inst/shiny/app.R
+          compare_file app_impl.R inst/shiny/app_impl.R
+
+          # app source must have the same www/ tree in both repositories.
+          find www -type f -printf '%P\n' | sort > "$work"/app-www.txt
+          git -C ongeor-src ls-tree -r --name-only "$UPSTREAM" -- inst/shiny/www \
+            | sed 's#^inst/shiny/www/##' | sort > "$work"/package-www.txt
+          comm -3 "$work"/app-www.txt "$work"/package-www.txt > "$work"/differing-www.txt
+          while IFS= read -r path; do
+            [ -z "$path" ] || differences+=("www/$path")
+          done < "$work"/differing-www.txt
+          while IFS= read -r path; do
+            compare_file "www/$path" "inst/shiny/www/$path"
+          done < <(comm -12 "$work"/app-www.txt "$work"/package-www.txt)
+
+          # These helpers locate app.R differently: system.file() in ONgeoR,
+          # and the repository root in ONgeoRapp.
+          skip_tests=(
+            tests/testthat/helper-shiny.R
+            tests/testthat/test-run_app.R
+          )
+          printf '%s\n' "${skip_tests[@]}" | sed 's/^/Skipping allowlisted: /'
+
+          find tests/testthat -maxdepth 1 -type f -name '*.R' -printf '%f\n' \
+            | sort > "$work"/app-tests.txt
+          git -C ongeor-src ls-tree -r --name-only "$UPSTREAM" -- tests/testthat \
+            | sed 's#^tests/testthat/##' | grep '\.R$' | sort > "$work"/package-tests.txt
+          while IFS= read -r name; do
+            app_path="tests/testthat/$name"
+            case "$app_path" in
+              tests/testthat/helper-shiny.R|tests/testthat/test-run_app.R)
+                continue
+                ;;
+            esac
+            compare_file "$app_path" "tests/testthat/$name"
+          done < <(comm -12 "$work"/app-tests.txt "$work"/package-tests.txt)
+
+          if [ "${#differences[@]}" -ne 0 ]; then
+            echo "::error::Shared ONgeoRapp files differ from ONgeoR."
+            echo ""
+            printf '%s\n' "${differences[@]}" | sed 's/^/  /'
+            echo ""
+            echo "Resync each path from ONgeoR (inst/shiny/ for app source),"
+            echo "then commit the matching copies in both repositories."
+            exit 1
+          fi
+
+          echo "OK - shared app files match ONgeoR."

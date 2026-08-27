@@ -37,6 +37,8 @@ shiny_fixture_layers <- function() {
 shiny_app_file <- function() {
   app_root <- Sys.getenv("ONgeoRAPP_ROOT", unset = "")
   if (!nzchar(app_root)) app_root <- getOption("ONgeoRapp.app_root")
+  # Avoid the nzchar(NULL) trap when the option has not been configured.
+  if (is.null(app_root)) app_root <- ""
   candidates <- c(
     if (nzchar(app_root)) file.path(app_root, "app.R"),
     testthat::test_path("..", "..", "app.R"),

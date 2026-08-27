@@ -1458,6 +1458,10 @@ test_that("mixed crosswalks carry all attributes once per target", {
 
   normalized <- env$normalize_mixed_crosswalk(crosswalk, source, target)
   expect_equal(nrow(normalized), nrow(target))
+  expect_true(all(
+    paste0("src_", names(sf::st_drop_geometry(source))) %in%
+      names(normalized)
+  ))
   expect_true(all(c(
     "src_source_id", "src_source_attr_10",
     "tgt_target_id", "tgt_target_attr_5", "match_method",
@@ -1472,8 +1476,10 @@ test_that("mixed crosswalks carry all attributes once per target", {
 
   merged <- env$merge_target_attributes(target, crosswalk = normalized)
   expect_equal(nrow(merged), nrow(target))
-  expect_true(all(c("src_source_attr_1", "src_source_attr_10",
-    "tgt_target_attr_1", "tgt_target_attr_5") %in% names(merged)))
+  expect_true(all(c(
+    paste0("src_", names(sf::st_drop_geometry(source))),
+    "tgt_target_attr_1", "tgt_target_attr_5"
+  ) %in% names(merged)))
   expect_true(is.na(merged$src_source_attr_1[3]))
 })
 

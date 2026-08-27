@@ -1,5 +1,8 @@
 # ONgeoRapp (development version)
 
+* Resynced the standalone app tests with ONgeoR and added a CI parity check
+  for the shared app source.
+
 * Add no-key Esri Light Gray Canvas and Satellite (Hybrid) basemaps to the
   map's basemap control.
 

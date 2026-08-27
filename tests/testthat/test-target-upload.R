@@ -100,6 +100,13 @@ test_that("the postal dropdown wins over a left-over own-file tick", {
     session$setInputs(overlay_source = "postal_upload")
     expect_false(own_upload_active())
     expect_identical(effective_overlay_id(), "postal_upload")
+
+    # Selecting the postal route must also render the file chooser. A missing
+    # postal_upload_ui output leaves the selection looking valid while making
+    # it impossible to provide the input file.
+    postal_ui <- rendered_html(output$postal_upload_ui)
+    expect_match(postal_ui, 'id="postal_file"', fixed = TRUE)
+    expect_match(postal_ui, "Browse", fixed = TRUE)
   })
 })
 
