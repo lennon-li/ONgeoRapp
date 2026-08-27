@@ -1,5 +1,8 @@
 # ONgeoRapp (development version)
 
+* Add no-key Esri Light Gray Canvas and Satellite (Hybrid) basemaps to the
+  map's basemap control.
+
 * The Data tab now shows the joined result rather than the crosswalk. It used
   to render `build_crosswalk()`'s fixed assignment/provenance table, which
   carries neither layer's attributes - so a join of a 5-attribute target to a

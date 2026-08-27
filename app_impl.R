@@ -381,8 +381,9 @@ color_choices <- c(
 )
 
 # basemap_groups defines the display order for the native Leaflet control.
-# "None" intentionally has no associated tile layer. The Esri layer uses the
-# public legacy World Street Map tiles, which carry attribution but no API key.
+# "None" intentionally has no associated tile layer. The two new Esri groups
+# each contain multiple tile layers; the legacy World Street Map tiles carry
+# attribution but no API key.
 #
 # Leaflet resolves base groups with getLayerGroup(g, ensureExists = TRUE), so
 # naming a group with no layer CREATES an empty feature group and attaches it
@@ -391,7 +392,7 @@ color_choices <- c(
 # "OpenStreetMap" must stay FIRST and "None" LAST: the order is what makes the
 # no-basemap entry behave, not a special case in leaflet.
 basemap_groups <- c(
-  "OpenStreetMap", "Esri World Street Map", "None"
+  "OpenStreetMap", "Light Gray", "Satellite (Hybrid)", "Esri World Street Map", "None"
 )
 
 # Emits the geometry-specific style controls for a single layer slot. `prefix`
@@ -1420,7 +1421,34 @@ retrieval_failure_notification <- function(described) {
 
 # Add no-key basemaps; OpenStreetMap remains the default visible base layer.
 base_leaflet_layers <- function(map) {
+  esri_legacy_tiles <- function(service) {
+    paste0(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/", service,
+      "/MapServer/tile/{z}/{y}/{x}"
+    )
+  }
+
   map <- leaflet::addProviderTiles(map, "OpenStreetMap.Mapnik", group = "OpenStreetMap")
+  map <- leaflet::addProviderTiles(map, "Esri.WorldGrayCanvas", group = "Light Gray")
+  map <- leaflet::addTiles(
+    map,
+    urlTemplate = esri_legacy_tiles("Canvas/World_Light_Gray_Reference"),
+    attribution = "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
+    group = "Light Gray"
+  )
+  map <- leaflet::addProviderTiles(map, "Esri.WorldImagery", group = "Satellite (Hybrid)")
+  map <- leaflet::addTiles(
+    map,
+    urlTemplate = esri_legacy_tiles("Reference/World_Boundaries_and_Places"),
+    attribution = "Tiles &copy; Esri",
+    group = "Satellite (Hybrid)"
+  )
+  map <- leaflet::addTiles(
+    map,
+    urlTemplate = esri_legacy_tiles("Reference/World_Transportation"),
+    attribution = "Tiles &copy; Esri",
+    group = "Satellite (Hybrid)"
+  )
   map <- leaflet::addProviderTiles(
     map,
     "Esri.WorldStreetMap",
